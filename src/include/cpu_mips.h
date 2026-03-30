@@ -215,6 +215,9 @@ struct mips_cpu {
 	uint64_t	hi;
 	uint64_t	lo;
 
+	/*  MIPS16 ISA mode:  */
+	int		mips16;		/*  1 = currently in MIPS16 mode  */
+
 	/*  Coprocessors:  */
 	struct mips_coproc *coproc[N_MIPS_COPROCS];
 	uint64_t	cop0_config_select1;
