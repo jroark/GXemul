@@ -711,23 +711,18 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			/*  Bit 10 of hi_word = X bit (JALX vs JAL)  */
 			jalx = (hi_word >> 10) & 1;
 			/*
-			 *  target[25:16] = hi_word[9:0] (bits 25..16)
-			 *  target[15:0]  = lo_word[15:0]
-			 *  These form a 26-bit field, shifted left 2.
+			 *  The 26-bit target is encoded across both
+			 *  halfwords with bits [20:16] and [25:21]
+			 *  swapped relative to the standard MIPS J
+			 *  encoding:
+			 *
+			 *  hi_word[9:5]  -> target[20:16]
+			 *  hi_word[4:0]  -> target[25:21]
+			 *  lo_word[15:0] -> target[15:0]
 			 */
-			target = ((uint32_t)(hi_word & 0x3ff) << 16) |
+			target = ((uint32_t)(hi_word & 0x1f) << 21) |
+			    ((uint32_t)((hi_word >> 5) & 0x1f) << 16) |
 			    lo_word;
-			/*
-			 *  However the MIPS16 JAL encoding swaps
-			 *  bits [20:16] with [25:21]:
-			 */
-			target = ((target >> 5) & 0x1f) |
-			    ((target & 0x1f) << 5) |
-			    (target & 0x3fffc0);
-			/*  Not needed to re-decode — just assemble properly.
-			 *  Actually let's just use the standard decoding:
-			 *  The target field is bits [25:0], shifted left 2.
-			 */
 
 			/*  Link: RA = address of instruction after JAL (PC+4,
 			 *  since JAL is 4 bytes).  Set bit 0 to indicate
@@ -735,7 +730,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			cpu->cd.mips.gpr[MIPS_GPR_RA] =
 			    (cpu->pc + 4) | 1;
 
-			/*  Compute target  */
+			/*  Compute target: 26-bit field shifted left 2  */
 			target <<= 2;
 			cpu->pc = ((cpu->pc + 2) & 0xf0000000) | target;
 
