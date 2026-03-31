@@ -56,6 +56,24 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 #define	SIGN_EXTEND(val, bits)	\
 	((int32_t)((val) << (32 - (bits))) >> (32 - (bits)))
 
+/*
+ *  Check memory access result.  If the access failed because a TLB
+ *  exception was taken (STATUS_EXL is now set), that's normal — the
+ *  exception handler will run in MIPS32 mode (mips16 was cleared by
+ *  mips_cpu_exception) and ERET will return to retry.  Return 1 so the
+ *  dyntrans loop exits the MIPS16 interpreter cleanly.
+ *
+ *  Only kill the CPU if the access failed for a non-exception reason
+ *  (e.g., unmapped physical address with no exception handler).
+ */
+#define	M16_MEM_EXCEPTION_CHECK()  do {					\
+		if (cpu->cd.mips.coproc[0]->reg[COP0_STATUS]		\
+		    & STATUS_EXL)					\
+			return 1;					\
+		cpu->running = 0;					\
+		return 0;						\
+	} while (0)
+
 /*  Regnames, for disassembly trace output  */
 static const char *regnames[] = MIPS_REGISTER_NAMES;
 
@@ -548,9 +566,11 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 	uint16_t extend_word = 0;
 
 	if (!cpu->cd.mips.mips16) {
-		fatal("mips_cpu_interpret_mips16_SLOW called when not in "
-		    "MIPS16 mode?\n");
-		cpu->running = 0;
+		/*
+		 *  This can happen normally: an exception during MIPS16
+		 *  execution clears the mips16 flag, and the dyntrans
+		 *  loop re-enters before checking the flag.  Just return.
+		 */
 		return 0;
 	}
 
@@ -558,10 +578,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 	/*  Fetch the instruction  */
 	iw = m16_fetch(cpu, addr, &ok);
 	if (!ok) {
-		fatal("mips_cpu_interpret_mips16_SLOW(): could not read "
-		    "the instruction at 0x%" PRIx64 "\n", addr);
-		cpu->running = 0;
-		return 0;
+		M16_MEM_EXCEPTION_CHECK();
 	}
 
 	op = (iw >> 11) & 0x1f;
@@ -572,10 +589,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		addr += 2;
 		iw = m16_fetch(cpu, addr, &ok);
 		if (!ok) {
-			fatal("mips_cpu_interpret_mips16_SLOW(): could not "
-			    "read extended instruction\n");
-			cpu->running = 0;
-			return 0;
+			M16_MEM_EXCEPTION_CHECK();
 		}
 		op = (iw >> 11) & 0x1f;
 		extended = 1;
@@ -703,10 +717,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			/*  Fetch second halfword  */
 			lo_word = m16_fetch(cpu, cpu->pc + 2, &ok);
 			if (!ok) {
-				fatal("mips_cpu_interpret_mips16_SLOW(): "
-				    "could not read JAL second halfword\n");
-				cpu->running = 0;
-				return 0;
+				M16_MEM_EXCEPTION_CHECK();
 			}
 
 			/*  Bit 10 of hi_word = X bit (JALX vs JAL)  */
@@ -936,8 +947,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					    offset8;
 					if (!m16_store_word(cpu, a,
 					    cpu->cd.mips.gpr[MIPS_GPR_RA])) {
-						cpu->running = 0;
-						return 0;
+						M16_MEM_EXCEPTION_CHECK();
 					}
 				}
 				break;
@@ -1033,7 +1043,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_byte(cpu, a, &ok);
-			if (!ok) { cpu->running = 0; return 0; }
+			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
 			M16REG(ry) = (int32_t)(int8_t)val;
 		}
 		break;
@@ -1054,7 +1064,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_half(cpu, a, &ok);
-			if (!ok) { cpu->running = 0; return 0; }
+			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
 			M16REG(ry) = (int32_t)(int16_t)val;
 		}
 		break;
@@ -1075,7 +1085,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)
 			    cpu->cd.mips.gpr[MIPS_GPR_SP] + imm8);
 			val = m16_load_word(cpu, a, &ok);
-			if (!ok) { cpu->running = 0; return 0; }
+			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
 			M16REG(rx) = (int32_t)val;
 		}
 		break;
@@ -1096,7 +1106,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_word(cpu, a, &ok);
-			if (!ok) { cpu->running = 0; return 0; }
+			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
 			M16REG(ry) = (int32_t)val;
 		}
 		break;
@@ -1117,7 +1127,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_byte(cpu, a, &ok);
-			if (!ok) { cpu->running = 0; return 0; }
+			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
 			M16REG(ry) = val;
 		}
 		break;
@@ -1138,7 +1148,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_half(cpu, a, &ok);
-			if (!ok) { cpu->running = 0; return 0; }
+			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
 			M16REG(ry) = val;
 		}
 		break;
@@ -1158,7 +1168,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			}
 			a = ((cpu->pc + 2) & ~3) + imm8;
 			val = m16_load_word(cpu, a, &ok);
-			if (!ok) { cpu->running = 0; return 0; }
+			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
 			M16REG(rx) = (int32_t)val;
 		}
 		break;
@@ -1178,8 +1188,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			if (!m16_store_byte(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
+				M16_MEM_EXCEPTION_CHECK();
 			}
 		}
 		break;
@@ -1199,8 +1208,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			if (!m16_store_half(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
+				M16_MEM_EXCEPTION_CHECK();
 			}
 		}
 		break;
@@ -1220,8 +1228,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)
 			    cpu->cd.mips.gpr[MIPS_GPR_SP] + imm8);
 			if (!m16_store_word(cpu, a, M16REG(rx))) {
-				cpu->running = 0;
-				return 0;
+				M16_MEM_EXCEPTION_CHECK();
 			}
 		}
 		break;
@@ -1241,8 +1248,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			if (!m16_store_word(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
+				M16_MEM_EXCEPTION_CHECK();
 			}
 		}
 		break;
