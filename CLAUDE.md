@@ -33,6 +33,7 @@ The core execution engine is in `src/cpus/cpu_dyntrans.c` — a template include
 | `src/cpus/cpu_mips.c` | Main CPU init, exception handling, disassembler, TLB dump |
 | `src/cpus/cpu_mips_instr.c` | Instruction handlers (`X(name)` macros) and `to_be_translated()` decoder |
 | `src/cpus/cpu_mips_coproc.c` | CP0/CP1 coprocessor register handling |
+| `src/cpus/cpu_mips16.c` | MIPS16 slow interpreter and disassembler |
 | `src/cpus/cpu_mips_instr_loadstore.c` | Load/store template (generates `tmp_mips_loadstore.c`) |
 | `src/cpus/memory_mips.c` | MMU, v2p translation, R3000 cache |
 | `src/include/cpu_mips.h` | `struct mips_cpu`, dyntrans macros, register constants |
@@ -46,19 +47,22 @@ The core execution engine is in `src/cpus/cpu_dyntrans.c` — a template include
 - **Instruction handlers**: Defined as `X(name) { ... }` which expands to a function taking `(struct cpu *, struct instr_call *)`. Register operands are passed as `size_t` pointers in `ic->arg[0..2]`, accessed via `reg(ic->arg[N])`.
 - **PC management**: The virtual `cpu->pc` and the IC pointer `cpu->cd.mips.next_ic` are kept in sync. `quick_pc_to_pointers()` converts PC to IC pointers after jumps.
 - **Delay slots**: Branch instructions set `cpu->delay_slot = TO_BE_DELAYED`, execute `ic[1]` (the delay slot), then take the branch.
-- **Variable-length ISAs**: Not supported by dyntrans. ARM Thumb uses a slow interpreter fallback (`arm_cpu_interpret_thumb_SLOW()` in `cpu_arm.c`). MIPS16 follows the same pattern.
+- **Variable-length ISAs**: Not supported by dyntrans. ARM Thumb and MIPS16 use slow interpreter fallbacks that bypass the IC array entirely.
+- **ISA mode switching in dyntrans**: When an IC handler switches ISA mode (e.g., JALX entering MIPS16), it must set `cpu->cd.<arch>.next_ic = &nothing_call` to safely drain the unrolled IC loop. The `nothing_call` handler (defined in `tmp_<arch>_head.c`) does `next_ic--` on each call, absorbing remaining iterations. The slow interpreter check at the top of `DYNTRANS_RUN_INSTR_DEF` (before `PC_TO_POINTERS` and interrupt checks) then catches the mode on the next entry. Do NOT use `quick_pc_to_pointers()` when entering a variable-length ISA mode — the IC page contains stale MIPS32 translations.
 - **Generated code**: `generate_head.c` / `generate_tail.c` produce `tmp_<arch>_head.c` / `tmp_<arch>_tail.c` which are `#include`d by the main CPU file. Don't edit `tmp_*` files.
 
 ### MIPS16 Implementation
 
-MIPS16 support follows the ARM Thumb precedent: a slow interpreter (`mips_cpu_interpret_mips16_SLOW()` in `src/cpus/cpu_mips16.c`) that bypasses dyntrans when the CPU is in MIPS16 mode (`cpu->cd.mips.mips16 == 1`).
+MIPS16 support follows the ARM Thumb precedent: a slow interpreter (`mips_cpu_interpret_mips16_SLOW()` in `src/cpus/cpu_mips16.c`) that bypasses dyntrans when `cpu->cd.mips.mips16 == 1`.
 
 Key aspects:
-- **Mode entry**: JR/JALR to an address with bit 0 set, or JALX from MIPS32
+- **Mode entry**: JR/JALR to an address with bit 0 set, or JALX (opcode `HI6_JALX` = 0x1d) from MIPS32. The IC handler sets `mips16 = 1`, `cpu->pc` to the target, and `next_ic = &nothing_call`.
 - **Mode exit**: JR/JALR to an address with bit 0 clear, JALX from MIPS16, or any exception
-- **Register mapping**: MIPS16 3-bit register fields map to GPRs {$16,$17,$2,$3,$4,$5,$6,$7}
+- **Register mapping**: MIPS16 3-bit register fields map to GPRs {$16,$17,$2,$3,$4,$5,$6,$7}; $24 (t8) is the implicit comparison result register
 - **EXTEND prefix**: A 16-bit prefix (opcode 11110) that widens the immediate field of the next instruction
-- **Exceptions**: EPC bit 0 preserves ISA mode; ERET restores it
+- **Exceptions**: `mips_cpu_exception()` saves ISA mode in EPC bit 0 and clears `mips16`; `X(eret)` restores `mips16` from EPC bit 0
+- **Execution loop**: The MIPS16 check is at the very top of `DYNTRANS_RUN_INSTR_DEF` (before `PC_TO_POINTERS` and interrupt checks). It runs a loop of up to `N_SAFE_DYNTRANS_LIMIT` MIPS16 instructions per batch.
+- **Test**: `test/mips16/test_mips16.S` exercises MIPS32→MIPS16→MIPS32 transitions via JALX/JR
 
 ### Exception Handling
 
