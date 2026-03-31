@@ -733,7 +733,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 
 			/*  Compute target: 26-bit field shifted left 2  */
 			target <<= 2;
-			cpu->pc = ((cpu->pc + 2) & 0xf0000000) | target;
+			cpu->pc = ((cpu->pc + 2) &
+			    ~(uint64_t)0x0fffffff) | target;
 
 			if (jalx) {
 				/*  Switch to MIPS32 mode  */

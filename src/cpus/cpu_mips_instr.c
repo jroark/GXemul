@@ -996,6 +996,8 @@ X(jr)
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->delay_slot = NOT_DELAYED;
 			cpu->cd.mips.next_ic = &nothing_call;
+			cpu->n_translated_instrs =
+			    N_SAFE_DYNTRANS_LIMIT;
 		} else {
 			cpu->pc = rs;
 			cpu->delay_slot = NOT_DELAYED;
@@ -1016,6 +1018,8 @@ X(jr_ra)
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->delay_slot = NOT_DELAYED;
 			cpu->cd.mips.next_ic = &nothing_call;
+			cpu->n_translated_instrs =
+			    N_SAFE_DYNTRANS_LIMIT;
 		} else {
 			cpu->pc = rs;
 			cpu->delay_slot = NOT_DELAYED;
@@ -1034,6 +1038,8 @@ X(jr_ra_addiu)
 		cpu->cd.mips.mips16 = 1;
 		cpu->pc = rs & ~(MODE_int_t)1;
 		cpu->cd.mips.next_ic = &nothing_call;
+			cpu->n_translated_instrs =
+			    N_SAFE_DYNTRANS_LIMIT;
 	} else {
 		cpu->pc = rs;
 		quick_pc_to_pointers(cpu);
@@ -1053,6 +1059,8 @@ X(jr_ra_trace)
 			cpu_functioncall_trace_return(cpu);
 			cpu->delay_slot = NOT_DELAYED;
 			cpu->cd.mips.next_ic = &nothing_call;
+			cpu->n_translated_instrs =
+			    N_SAFE_DYNTRANS_LIMIT;
 		} else {
 			cpu->pc = rs;
 			cpu_functioncall_trace_return(cpu);
@@ -1078,6 +1086,8 @@ X(jalr)
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->delay_slot = NOT_DELAYED;
 			cpu->cd.mips.next_ic = &nothing_call;
+			cpu->n_translated_instrs =
+			    N_SAFE_DYNTRANS_LIMIT;
 		} else {
 			cpu->pc = rs;
 			cpu->delay_slot = NOT_DELAYED;
@@ -1103,6 +1113,8 @@ X(jalr_trace)
 			cpu_functioncall_trace(cpu, cpu->pc);
 			cpu->delay_slot = NOT_DELAYED;
 			cpu->cd.mips.next_ic = &nothing_call;
+			cpu->n_translated_instrs =
+			    N_SAFE_DYNTRANS_LIMIT;
 		} else {
 			cpu->pc = rs;
 			cpu_functioncall_trace(cpu, cpu->pc);
@@ -1195,6 +1207,8 @@ X(jalx)
 		if (cpu->machine->show_trace_tree)
 			cpu_functioncall_trace(cpu, cpu->pc);
 		cpu->cd.mips.next_ic = &nothing_call;
+			cpu->n_translated_instrs =
+			    N_SAFE_DYNTRANS_LIMIT;
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -3705,6 +3719,8 @@ X(to_be_translated)
 	 */
 	if (cpu->cd.mips.mips16) {
 		cpu->cd.mips.next_ic = &nothing_call;
+			cpu->n_translated_instrs =
+			    N_SAFE_DYNTRANS_LIMIT;
 		return;
 	}
 
