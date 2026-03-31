@@ -991,7 +991,12 @@ X(jr)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
-		cpu->pc = rs;
+		if (rs & 1) {
+			cpu->cd.mips.mips16 = 1;
+			cpu->pc = rs & ~(MODE_int_t)1;
+		} else {
+			cpu->pc = rs;
+		}
 		/*  Note: Must be non-delayed when jumping to the new pc:  */
 		cpu->delay_slot = NOT_DELAYED;
 		quick_pc_to_pointers(cpu);
@@ -1005,7 +1010,12 @@ X(jr_ra)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
-		cpu->pc = rs;
+		if (rs & 1) {
+			cpu->cd.mips.mips16 = 1;
+			cpu->pc = rs & ~(MODE_int_t)1;
+		} else {
+			cpu->pc = rs;
+		}
 		/*  Note: Must be non-delayed when jumping to the new pc:  */
 		cpu->delay_slot = NOT_DELAYED;
 		quick_pc_to_pointers(cpu);
@@ -1018,7 +1028,12 @@ X(jr_ra_addiu)
 	MODE_int_t rs = cpu->cd.mips.gpr[MIPS_GPR_RA];
 	reg(ic[1].arg[1]) = (int32_t)
 	    ((int32_t)reg(ic[1].arg[0]) + (int32_t)ic[1].arg[2]);
-	cpu->pc = rs;
+	if (rs & 1) {
+		cpu->cd.mips.mips16 = 1;
+		cpu->pc = rs & ~(MODE_int_t)1;
+	} else {
+		cpu->pc = rs;
+	}
 	quick_pc_to_pointers(cpu);
 	cpu->n_translated_instrs ++;
 }
@@ -1029,7 +1044,12 @@ X(jr_ra_trace)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
-		cpu->pc = rs;
+		if (rs & 1) {
+			cpu->cd.mips.mips16 = 1;
+			cpu->pc = rs & ~(MODE_int_t)1;
+		} else {
+			cpu->pc = rs;
+		}
 		cpu_functioncall_trace_return(cpu);
 		/*  Note: Must be non-delayed when jumping to the new pc:  */
 		cpu->delay_slot = NOT_DELAYED;
@@ -1048,7 +1068,12 @@ X(jalr)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
-		cpu->pc = rs;
+		if (rs & 1) {
+			cpu->cd.mips.mips16 = 1;
+			cpu->pc = rs & ~(MODE_int_t)1;
+		} else {
+			cpu->pc = rs;
+		}
 		/*  Note: Must be non-delayed when jumping to the new pc:  */
 		cpu->delay_slot = NOT_DELAYED;
 		quick_pc_to_pointers(cpu);
@@ -1066,7 +1091,12 @@ X(jalr_trace)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
-		cpu->pc = rs;
+		if (rs & 1) {
+			cpu->cd.mips.mips16 = 1;
+			cpu->pc = rs & ~(MODE_int_t)1;
+		} else {
+			cpu->pc = rs;
+		}
 		cpu_functioncall_trace(cpu, cpu->pc);
 		/*  Note: Must be non-delayed when jumping to the new pc:  */
 		cpu->delay_slot = NOT_DELAYED;
@@ -1128,6 +1158,34 @@ X(jal_trace)
 		old_pc &= ~0x03ffffff;
 		cpu->pc = old_pc | (int32_t)ic->arg[0];
 		cpu_functioncall_trace(cpu, cpu->pc);
+		quick_pc_to_pointers(cpu);
+	} else
+		cpu->delay_slot = NOT_DELAYED;
+}
+
+
+/*
+ *  jalx:  Jump and Link Exchange (enter MIPS16 mode from MIPS32).
+ *
+ *  arg[0] = lowest 28 bits of new pc.
+ *  arg[1] = offset from start of page to the jalx instruction + 8
+ */
+X(jalx)
+{
+	MODE_int_t old_pc = cpu->pc;
+	cpu->delay_slot = TO_BE_DELAYED;
+	cpu->pc &= ~((MIPS_IC_ENTRIES_PER_PAGE-1)<<MIPS_INSTR_ALIGNMENT_SHIFT);
+	cpu->cd.mips.gpr[31] = (MODE_int_t)cpu->pc + (int32_t)ic->arg[1];
+	ic[1].f(cpu, ic+1);
+	cpu->n_translated_instrs ++;
+	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
+		/*  Note: Must be non-delayed when jumping to the new pc:  */
+		cpu->delay_slot = NOT_DELAYED;
+		old_pc &= ~0x03ffffff;
+		cpu->pc = old_pc | (int32_t)ic->arg[0];
+		cpu->cd.mips.mips16 = 1;
+		if (cpu->machine->show_trace_tree)
+			cpu_functioncall_trace(cpu, cpu->pc);
 		quick_pc_to_pointers(cpu);
 	} else
 		cpu->delay_slot = NOT_DELAYED;
@@ -2261,9 +2319,13 @@ X(eret)
 		cpu->cd.mips.coproc[0]->reg[COP0_STATUS] &= ~STATUS_ERL;
 	} else {
 		cpu->pc = cpu->cd.mips.coproc[0]->reg[COP0_EPC];
-		cpu->delay_slot = 0;             
+		cpu->delay_slot = 0;
 		cpu->cd.mips.coproc[0]->reg[COP0_STATUS] &= ~STATUS_EXL;
 	}
+
+	/*  Restore MIPS16 mode from EPC/ErrorEPC bit 0  */
+	cpu->cd.mips.mips16 = (cpu->pc & 1) ? 1 : 0;
+	cpu->pc &= ~(uint64_t)1;
 
 	quick_pc_to_pointers(cpu);
 
@@ -4145,6 +4207,7 @@ X(to_be_translated)
 
 	case HI6_J:
 	case HI6_JAL:
+	case HI6_JALX:
 		switch (main_opcode) {
 		case HI6_J:
 			ic->f = instr(j);
@@ -4156,6 +4219,9 @@ X(to_be_translated)
 				ic->f = instr(jal_trace);
 			else
 				ic->f = instr(jal);
+			break;
+		case HI6_JALX:
+			ic->f = instr(jalx);
 			break;
 		}
 		ic->arg[0] = (iword & 0x03ffffff) << 2;

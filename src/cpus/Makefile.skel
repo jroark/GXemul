@@ -147,6 +147,8 @@ cpu_mips.o: cpu_mips.c cpu_dyntrans.c memory_mips.c \
 	cpu_mips_instr.c tmp_mips_loadstore.c tmp_mips_loadstore_multi.c \
 	tmp_mips_head.c tmp_mips_tail.c
 
+cpu_mips16.o: cpu_mips16.c
+
 memory_mips.c: memory_rw.c memory_mips_v2p.c
 
 tmp_mips_loadstore.c: cpu_mips_instr_loadstore.c generate_mips_loadstore

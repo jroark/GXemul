@@ -251,6 +251,13 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 #endif
 	}
 
+#ifdef DYNTRANS_MIPS
+	if (cpu->cd.mips.mips16) {
+		mips_cpu_interpret_mips16_SLOW(cpu);
+		return 1;
+	}
+#endif
+
 #ifdef DYNTRANS_ARM
 	if (cpu->cd.arm.cpsr & ARM_FLAG_T) {
 		// fatal("THUMB execution not implemented.\n");
