@@ -995,7 +995,7 @@ X(jr)
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->delay_slot = NOT_DELAYED;
-			quick_pc_to_pointers(cpu);
+			cpu->cd.mips.next_ic = &nothing_call;
 		} else {
 			cpu->pc = rs;
 			cpu->delay_slot = NOT_DELAYED;
@@ -1015,7 +1015,7 @@ X(jr_ra)
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->delay_slot = NOT_DELAYED;
-			quick_pc_to_pointers(cpu);
+			cpu->cd.mips.next_ic = &nothing_call;
 		} else {
 			cpu->pc = rs;
 			cpu->delay_slot = NOT_DELAYED;
@@ -1033,7 +1033,7 @@ X(jr_ra_addiu)
 	if (rs & 1) {
 		cpu->cd.mips.mips16 = 1;
 		cpu->pc = rs & ~(MODE_int_t)1;
-		quick_pc_to_pointers(cpu);
+		cpu->cd.mips.next_ic = &nothing_call;
 	} else {
 		cpu->pc = rs;
 		quick_pc_to_pointers(cpu);
@@ -1052,7 +1052,7 @@ X(jr_ra_trace)
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu_functioncall_trace_return(cpu);
 			cpu->delay_slot = NOT_DELAYED;
-			quick_pc_to_pointers(cpu);
+			cpu->cd.mips.next_ic = &nothing_call;
 		} else {
 			cpu->pc = rs;
 			cpu_functioncall_trace_return(cpu);
@@ -1077,7 +1077,7 @@ X(jalr)
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->delay_slot = NOT_DELAYED;
-			quick_pc_to_pointers(cpu);
+			cpu->cd.mips.next_ic = &nothing_call;
 		} else {
 			cpu->pc = rs;
 			cpu->delay_slot = NOT_DELAYED;
@@ -1102,7 +1102,7 @@ X(jalr_trace)
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu_functioncall_trace(cpu, cpu->pc);
 			cpu->delay_slot = NOT_DELAYED;
-			quick_pc_to_pointers(cpu);
+			cpu->cd.mips.next_ic = &nothing_call;
 		} else {
 			cpu->pc = rs;
 			cpu_functioncall_trace(cpu, cpu->pc);
@@ -1194,11 +1194,7 @@ X(jalx)
 		cpu->cd.mips.mips16 = 1;
 		if (cpu->machine->show_trace_tree)
 			cpu_functioncall_trace(cpu, cpu->pc);
-		/*  Point next_ic past end of page to break the IC loop
-		 *  immediately.  The PC sync code will see an out-of-range
-		 *  low_pc and leave cpu->pc untouched.  */
-		cpu->cd.mips.next_ic = &cpu->cd.mips.cur_ic_page[
-		    MIPS_IC_ENTRIES_PER_PAGE + 2];
+		cpu->cd.mips.next_ic = &nothing_call;
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -3708,7 +3704,7 @@ X(to_be_translated)
 	 *  which will call the MIPS16 slow interpreter.
 	 */
 	if (cpu->cd.mips.mips16) {
-		quick_pc_to_pointers(cpu);
+		cpu->cd.mips.next_ic = &nothing_call;
 		return;
 	}
 
