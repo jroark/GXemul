@@ -994,12 +994,13 @@ X(jr)
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		} else {
 			cpu->pc = rs;
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		}
-		/*  Note: Must be non-delayed when jumping to the new pc:  */
-		cpu->delay_slot = NOT_DELAYED;
-		quick_pc_to_pointers(cpu);
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -1013,12 +1014,13 @@ X(jr_ra)
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		} else {
 			cpu->pc = rs;
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		}
-		/*  Note: Must be non-delayed when jumping to the new pc:  */
-		cpu->delay_slot = NOT_DELAYED;
-		quick_pc_to_pointers(cpu);
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -1031,10 +1033,11 @@ X(jr_ra_addiu)
 	if (rs & 1) {
 		cpu->cd.mips.mips16 = 1;
 		cpu->pc = rs & ~(MODE_int_t)1;
+		quick_pc_to_pointers(cpu);
 	} else {
 		cpu->pc = rs;
+		quick_pc_to_pointers(cpu);
 	}
-	quick_pc_to_pointers(cpu);
 	cpu->n_translated_instrs ++;
 }
 X(jr_ra_trace)
@@ -1047,13 +1050,15 @@ X(jr_ra_trace)
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
+			cpu_functioncall_trace_return(cpu);
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		} else {
 			cpu->pc = rs;
+			cpu_functioncall_trace_return(cpu);
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		}
-		cpu_functioncall_trace_return(cpu);
-		/*  Note: Must be non-delayed when jumping to the new pc:  */
-		cpu->delay_slot = NOT_DELAYED;
-		quick_pc_to_pointers(cpu);
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -1071,12 +1076,13 @@ X(jalr)
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		} else {
 			cpu->pc = rs;
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		}
-		/*  Note: Must be non-delayed when jumping to the new pc:  */
-		cpu->delay_slot = NOT_DELAYED;
-		quick_pc_to_pointers(cpu);
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -1094,13 +1100,15 @@ X(jalr_trace)
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
+			cpu_functioncall_trace(cpu, cpu->pc);
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		} else {
 			cpu->pc = rs;
+			cpu_functioncall_trace(cpu, cpu->pc);
+			cpu->delay_slot = NOT_DELAYED;
+			quick_pc_to_pointers(cpu);
 		}
-		cpu_functioncall_trace(cpu, cpu->pc);
-		/*  Note: Must be non-delayed when jumping to the new pc:  */
-		cpu->delay_slot = NOT_DELAYED;
-		quick_pc_to_pointers(cpu);
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -1186,7 +1194,11 @@ X(jalx)
 		cpu->cd.mips.mips16 = 1;
 		if (cpu->machine->show_trace_tree)
 			cpu_functioncall_trace(cpu, cpu->pc);
-		quick_pc_to_pointers(cpu);
+		/*  Point next_ic past end of page to break the IC loop
+		 *  immediately.  The PC sync code will see an out-of-range
+		 *  low_pc and leave cpu->pc untouched.  */
+		cpu->cd.mips.next_ic = &cpu->cd.mips.cur_ic_page[
+		    MIPS_IC_ENTRIES_PER_PAGE + 2];
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -2174,7 +2186,7 @@ X(reboot)
 		return;
 
 	cpu->running = false;
-	cpu->cd.mips.next_ic = &nothing_call;
+	quick_pc_to_pointers(cpu);
 }
 
 
@@ -2394,7 +2406,7 @@ X(idle)
 
 	cpu->wants_to_idle = true;
 	cpu->n_translated_instrs += N_DYNTRANS_IDLE_BREAK;
-	cpu->cd.mips.next_ic = &nothing_call;
+	quick_pc_to_pointers(cpu);
 }
 
 
@@ -3199,6 +3211,15 @@ X(b_samepage_daddiu)
 
 X(end_of_page)
 {
+	/*
+	 *  MIPS16 mode: The PC was already set by the mode-switching
+	 *  instruction.  Break out of the IC loop without modifying PC.
+	 */
+	if (cpu->cd.mips.mips16) {
+		cpu->n_translated_instrs --;
+		return;
+	}
+
 	/*  Update the PC:  (offset 0, but on the next page)  */
 	cpu->pc &= ~((MIPS_IC_ENTRIES_PER_PAGE-1) <<
 	    MIPS_INSTR_ALIGNMENT_SHIFT);
@@ -3680,6 +3701,16 @@ X(to_be_translated)
 	int in_crosspage_delayslot = 0;
 	void (*samepage_function)(struct cpu *, struct mips_instr_call *);
 	int store, signedness, size;
+
+	/*
+	 *  MIPS16 mode: Don't translate — force the IC loop to break
+	 *  so control returns to the top of DYNTRANS_RUN_INSTR_DEF,
+	 *  which will call the MIPS16 slow interpreter.
+	 */
+	if (cpu->cd.mips.mips16) {
+		quick_pc_to_pointers(cpu);
+		return;
+	}
 
 	/*  Figure out the (virtual) address of the instruction:  */
 	low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)

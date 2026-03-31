@@ -179,6 +179,25 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 	MODE_uint_t cached_pc;
 	int low_pc, n_instrs;
 
+	/*
+	 *  MIPS16/ARM Thumb mode: bypass dyntrans and use slow interpreter.
+	 *  This must come before PC-to-pointers conversion and interrupt
+	 *  checks, as the dyntrans IC system assumes fixed-width instructions.
+	 */
+#ifdef DYNTRANS_MIPS
+	if (cpu->cd.mips.mips16) {
+		mips_cpu_interpret_mips16_SLOW(cpu);
+		return 1;
+	}
+#endif
+
+#ifdef DYNTRANS_ARM
+	if (cpu->cd.arm.cpsr & ARM_FLAG_T) {
+		arm_cpu_interpret_thumb_SLOW(cpu);
+		return 1;
+	}
+#endif
+
 	/*  Ugly... fix this some day.  */
 #ifdef DYNTRANS_DUALMODE_32
 #ifdef MODE32
@@ -250,24 +269,6 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 			sh_exception(cpu, 0, cpu->cd.sh.int_to_assert, 0);
 #endif
 	}
-
-#ifdef DYNTRANS_MIPS
-	if (cpu->cd.mips.mips16) {
-		mips_cpu_interpret_mips16_SLOW(cpu);
-		return 1;
-	}
-#endif
-
-#ifdef DYNTRANS_ARM
-	if (cpu->cd.arm.cpsr & ARM_FLAG_T) {
-		// fatal("THUMB execution not implemented.\n");
-		// cpu->running = false;
-		// return 0;
-		
-		arm_cpu_interpret_thumb_SLOW(cpu);
-		return 1;
-	}
-#endif
 
 	cached_pc = cpu->pc;
 
@@ -399,6 +400,12 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 	n_instrs += cpu->n_translated_instrs;
 
 	/*  Synchronize the program counter:  */
+#ifdef DYNTRANS_MIPS
+	/*  Skip PC sync when in MIPS16 mode — the PC was already
+	    set by the mode-switching instruction handler:  */
+	if (cpu->cd.mips.mips16)
+		goto skip_pc_sync;
+#endif
 	low_pc = ((size_t)cpu->cd.DYNTRANS_ARCH.next_ic - (size_t)
 	    cpu->cd.DYNTRANS_ARCH.cur_ic_page) / sizeof(struct DYNTRANS_IC);
 	if (low_pc >= 0 && low_pc < DYNTRANS_IC_ENTRIES_PER_PAGE) {
@@ -419,6 +426,10 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 		cpu->pc += ((DYNTRANS_IC_ENTRIES_PER_PAGE + 1) <<
 		    DYNTRANS_INSTR_ALIGNMENT_SHIFT);
 	}
+
+#ifdef DYNTRANS_MIPS
+skip_pc_sync:
+#endif
 
 #ifdef DYNTRANS_MIPS
 	/*  Update the count register (on everything except EXC3K):  */

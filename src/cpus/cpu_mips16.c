@@ -554,6 +554,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		return 0;
 	}
 
+
 	/*  Fetch the instruction  */
 	iw = m16_fetch(cpu, addr, &ok);
 	if (!ok) {
