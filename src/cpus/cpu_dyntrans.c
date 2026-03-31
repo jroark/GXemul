@@ -186,8 +186,14 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 	 */
 #ifdef DYNTRANS_MIPS
 	if (cpu->cd.mips.mips16) {
-		mips_cpu_interpret_mips16_SLOW(cpu);
-		return 1;
+		int m16_count = 0;
+		while (cpu->cd.mips.mips16 && cpu->running &&
+		    m16_count < N_SAFE_DYNTRANS_LIMIT) {
+			if (!mips_cpu_interpret_mips16_SLOW(cpu))
+				break;
+			m16_count++;
+		}
+		return m16_count > 0 ? m16_count : 1;
 	}
 #endif
 
