@@ -383,6 +383,28 @@ void machine_statistics_init(struct machine *machine, char *fname)
 
 
 /*
+ *  machine_set_probe():
+ *
+ *  Install or remove a per-instruction probe callback.
+ *  Pass func=NULL to remove the probe.
+ */
+void machine_set_probe(struct machine *machine,
+	probe_func_t func, void *extra)
+{
+	if (func != NULL) {
+		machine->probe.func = func;
+		machine->probe.extra = extra;
+		machine->probe.enabled = 1;
+		machine->allow_instruction_combinations = 0;
+	} else {
+		machine->probe.func = NULL;
+		machine->probe.extra = NULL;
+		machine->probe.enabled = 0;
+	}
+}
+
+
+/*
  *  machine_dumpinfo():
  *
  *  Dumps info about a machine in some kind of readable format. (Used by

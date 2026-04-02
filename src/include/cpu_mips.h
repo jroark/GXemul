@@ -217,6 +217,8 @@ struct mips_cpu {
 
 	/*  MIPS16 ISA mode:  */
 	int		mips16;		/*  1 = currently in MIPS16 mode  */
+	uint64_t	m16_delay_target;  /*  JAL/JALX/JR/JALR target (pending delay slot)  */
+	int		m16_delay_jalx;    /*  0=JAL(stay M16), 1=JALX(->M32), 2=JR/JALR(bit0)  */
 
 	/*  Coprocessors:  */
 	struct mips_coproc *coproc[N_MIPS_COPROCS];

@@ -68,6 +68,14 @@ struct statistics {
 	char	*fields;		/*  "vpi" etc.  */
 };
 
+typedef void (*probe_func_t)(struct cpu *cpu, uint64_t pc, void *extra);
+
+struct probe {
+	probe_func_t	func;
+	void		*extra;
+	int		enabled;
+};
+
 struct tick_functions {
 	int	n_entries;
 
@@ -170,6 +178,9 @@ struct machine {
 
 	/*  Instruction statistics:  */
 	struct statistics statistics;
+
+	/*  Per-instruction probe callback:  */
+	struct probe probe;
 
 	/*  X11/framebuffer stuff (per machine):  */
 	struct x11_md x11_md;
@@ -382,6 +393,8 @@ void machine_add_breakpoint_string(struct machine *machine, char *str);
 void machine_add_tickfunction(struct machine *machine,
 	void (*func)(struct cpu *, void *), void *extra, int clockshift);
 void machine_statistics_init(struct machine *, char *fname);
+void machine_set_probe(struct machine *machine,
+	probe_func_t func, void *extra);
 void machine_register(char *name, MACHINE_SETUP_TYPE(setup));
 void machine_setup(struct machine *);
 void machine_add_devices_as_symbols(struct machine *machine, uint64_t offset);
