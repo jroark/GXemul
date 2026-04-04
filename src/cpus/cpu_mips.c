@@ -50,7 +50,7 @@
 #include "opcodes_mips.h"
 #include "settings.h"
 #include "symbol.h"
-
+#include "wince_boot.h"
 
 static const char *exception_names[] = EXCEPTION_NAMES;
 
@@ -702,7 +702,6 @@ int mips_cpu_disassemble_instr(struct cpu *cpu, unsigned char *originstr,
 	if (running && cpu->cd.mips.mips16)
 		return mips_cpu_disassemble_instr_mips16(cpu, originstr,
 		    running, dumpaddr);
-
 	if ((dumpaddr & 3) != 0)
 		printf("WARNING: Unaligned address!\n");
 
@@ -1817,27 +1816,29 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	}
 
 	if (tlb && vaddr < 0x1000) {
-		uint64_t offset;
-		char *symbol = get_symbol_name(&cpu->machine->symbol_context,
-		    cpu->pc, &offset);
+		if (!wince_boot_note_low_reference_fault(cpu, vaddr, exccode)) {
+			uint64_t offset;
+			char *symbol = get_symbol_name(&cpu->machine->symbol_context,
+			    cpu->pc, &offset);
 
-		// TODO: debugmsg SUBSYS_CPU, or better: SUBSYS_EXCEPTION
-		// VERBOSITY_WARNING since this is a relatively sure sign of a bug.
+			// TODO: debugmsg SUBSYS_CPU, or better: SUBSYS_EXCEPTION
+			// VERBOSITY_WARNING since this is a relatively sure sign of a bug.
 
-		fatal("[ ");
-		if (cpu->machine->ncpus > 1)
-			fatal("cpu%i: ", cpu->cpu_id);
-		fatal("warning: LOW reference: vaddr=");
-		if (cpu->is_32bit)
-			fatal("0x%08" PRIx32, (uint32_t) vaddr);
-		else
-			fatal("0x%016" PRIx64, (uint64_t) vaddr);
-		fatal(", exception %s, pc=", exception_names[exccode]);
-		if (cpu->is_32bit)
-			fatal("0x%08" PRIx32, (uint32_t) cpu->pc);
-		else
-			fatal("0x%016" PRIx64, (uint64_t)cpu->pc);
-		fatal(" <%s> ]\n", symbol? symbol : "(no symbol)");
+			fatal("[ ");
+			if (cpu->machine->ncpus > 1)
+				fatal("cpu%i: ", cpu->cpu_id);
+			fatal("warning: LOW reference: vaddr=");
+			if (cpu->is_32bit)
+				fatal("0x%08" PRIx32, (uint32_t) vaddr);
+			else
+				fatal("0x%016" PRIx64, (uint64_t) vaddr);
+			fatal(", exception %s, pc=", exception_names[exccode]);
+			if (cpu->is_32bit)
+				fatal("0x%08" PRIx32, (uint32_t) cpu->pc);
+			else
+				fatal("0x%016" PRIx64, (uint64_t)cpu->pc);
+			fatal(" <%s> ]\n", symbol? symbol : "(no symbol)");
+		}
 	}
 
 	/*  Clear the exception code bits of the cause register...  */
@@ -1934,91 +1935,7 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	} else {
 		if (cpu->delay_slot) {
 			reg[COP0_EPC] = cpu->pc - 4;
-			reg[COP0_CAUSE] |= CAUSE_BD;
-		} else {
-			reg[COP0_EPC] = cpu->pc;
-			reg[COP0_CAUSE] &= ~CAUSE_BD;
-		}
 
 		/*  MIPS16: preserve ISA mode in EPC bit 0  */
 		if (cpu->cd.mips.mips16)
 			reg[COP0_EPC] |= 1;
-	}
-
-	/*  Exceptions always execute in MIPS32 mode  */
-	cpu->cd.mips.mips16 = 0;
-
-	if (cpu->delay_slot)
-		cpu->delay_slot = EXCEPTION_IN_DELAY_SLOT;
-	else
-		cpu->delay_slot = NOT_DELAYED;
-
-	/*  TODO: This is true for MIPS64, but how about others?  */
-	if (reg[COP0_STATUS] & STATUS_BEV)
-		base = 0xffffffffbfc00200ULL;
-	else
-		base = 0xffffffff80000000ULL;
-
-	switch (exc_model) {
-	case EXC3K:
-		/*  Userspace tlb, vs others:  */
-		if (tlb && !(vaddr & 0x80000000ULL) &&
-		    (exccode == EXCEPTION_TLBL || exccode == EXCEPTION_TLBS) )
-			cpu->pc = base + 0x000;
-		else
-			cpu->pc = base + 0x080;
-		break;
-	default:
-		/*
-		 *  These offsets are according to the MIPS64 manual, but
-		 *  should work with R4000 and the rest too (I hope).
-		 *
-		 *  0x000  TLB refill, if EXL=0
-		 *  0x080  64-bit XTLB refill, if EXL=0
-		 *  0x100  cache error  (not implemented yet)
-		 *  0x180  general exception
-		 *  0x200  interrupt (if CAUSE_IV is set)
-		 */
-		if (tlb && (exccode == EXCEPTION_TLBL ||
-		    exccode == EXCEPTION_TLBS) &&
-		    !(reg[COP0_STATUS] & STATUS_EXL)) {
-			if (x_64)
-				cpu->pc = base + 0x080;
-			else
-				cpu->pc = base + 0x000;
-		} else {
-			if (exccode == EXCEPTION_INT &&
-			    (reg[COP0_CAUSE] & CAUSE_IV))
-				cpu->pc = base + 0x200;
-			else
-				cpu->pc = base + 0x180;
-		}
-	}
-
-	if (exc_model == EXC3K) {
-		/*  R{2,3}000:  Shift the lowest 6 bits to the left two steps:*/
-		reg[COP0_STATUS] = (reg[COP0_STATUS] & ~0x3f) +
-		    ((reg[COP0_STATUS] & 0xf) << 2);
-	} else {
-		/*  R4000:  */
-		reg[COP0_STATUS] |= STATUS_EXL;
-	}
-
-	/*  Sign-extend:  */
-	reg[COP0_CAUSE] = (int64_t)(int32_t)reg[COP0_CAUSE];
-	reg[COP0_STATUS] = (int64_t)(int32_t)reg[COP0_STATUS];
-
-	if (cpu->is_32bit) {
-		reg[COP0_EPC] = (int64_t)(int32_t)reg[COP0_EPC];
-		mips32_pc_to_pointers(cpu);
-	} else {
-		mips_pc_to_pointers(cpu);
-	}
-}
-
-
-#include "memory_mips.c"
-
-
-#include "tmp_mips_tail.c"
-

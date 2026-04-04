@@ -52,27 +52,27 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 
 #define	M16REG(x)	cpu->cd.mips.gpr[mips16_reg_map[(x) & 7]]
 
+/*
+ *  When a MIPS16 memory access fails, check if it was a TLB exception
+ *  (EXL now set in Status).  If so, return 1 — the exception was taken
+ *  and the exception handler will run.  Only kill the CPU for true
+ *  fatal failures (bus error, etc.).
+ */
+#define	M16_CHECK_MEM_OK(ok)	do {					\
+	if (!(ok)) {							\
+		if (cpu->cd.mips.coproc[0]->reg[COP0_STATUS] & STATUS_EXL) \
+			return 1;  /* exception taken, handler will run */  \
+		fprintf(stderr, "[MIPS16] fatal mem fail pc=0x%" PRIx64	\
+		    " status=0x%08x\n", cpu->pc,			\
+		    (uint32_t)cpu->cd.mips.coproc[0]->reg[COP0_STATUS]);\
+		cpu->running = 0;					\
+		return 0;						\
+	}								\
+} while (0)
+
 /*  Sign-extend a value with 'bits' significant bits  */
 #define	SIGN_EXTEND(val, bits)	\
 	((int32_t)((val) << (32 - (bits))) >> (32 - (bits)))
-
-/*
- *  Check memory access result.  If the access failed because a TLB
- *  exception was taken (STATUS_EXL is now set), that's normal — the
- *  exception handler will run in MIPS32 mode (mips16 was cleared by
- *  mips_cpu_exception) and ERET will return to retry.  Return 1 so the
- *  dyntrans loop exits the MIPS16 interpreter cleanly.
- *
- *  Only kill the CPU if the access failed for a non-exception reason
- *  (e.g., unmapped physical address with no exception handler).
- */
-#define	M16_MEM_EXCEPTION_CHECK()  do {					\
-		if (cpu->cd.mips.coproc[0]->reg[COP0_STATUS]		\
-		    & STATUS_EXL)					\
-			return 1;					\
-		cpu->running = 0;					\
-		return 0;						\
-	} while (0)
 
 /*  Regnames, for disassembly trace output  */
 static const char *regnames[] = MIPS_REGISTER_NAMES;
@@ -212,11 +212,12 @@ int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
 				break;
 			case M16_I8_MOV32R:
 				{
-					int r32 = (iw >> 3) & 0x1f;
-					int src = iw & 0x7;
+					int rz5 = iw & 0x1f;
+					int r32 = ((rz5 & 0x7) << 2) |
+					    (rz5 >> 3);
 					debug("mov32r\t$%s, $%s\n",
 					    regnames[r32],
-					    regnames[mips16_reg_map[src]]);
+					    regnames[mips16_reg_map[ry]]);
 				}
 				break;
 			case M16_I8_MOVR32:
@@ -565,19 +566,10 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 	int extended = 0;
 	uint16_t extend_word = 0;
 
-	if (!cpu->cd.mips.mips16) {
-		/*
-		 *  This can happen normally: an exception during MIPS16
-		 *  execution clears the mips16 flag, and the dyntrans
-		 *  loop re-enters before checking the flag.  Just return.
-		 */
-		return 0;
-	}
-
 	/*
-	 *  Delay slot completion: if we just executed a delay slot
-	 *  instruction (delay_slot == DELAYED), redirect PC to the
-	 *  saved branch target now.
+	 *  JAL/JALX delay slot completion: if we just executed the
+	 *  delay slot instruction (delay_slot == DELAYED), redirect
+	 *  PC to the saved branch target now.
 	 */
 	if (cpu->delay_slot == DELAYED) {
 		uint64_t target = cpu->cd.mips.m16_delay_target;
@@ -585,14 +577,18 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		cpu->delay_slot = NOT_DELAYED;
 		cpu->cd.mips.m16_delay_jalx = 0;
 		switch (mode) {
-		case 0:  /* JAL: stay in MIPS16 mode */
+		case 0:
+			/*  JAL: stay in MIPS16 mode, target is
+			 *  a plain address (bit 0 not meaningful)  */
 			cpu->pc = target;
 			break;
-		case 1:  /* JALX: switch to MIPS32 */
+		case 1:
+			/*  JALX: switch to MIPS32 mode  */
 			cpu->cd.mips.mips16 = 0;
 			cpu->pc = target;
 			break;
-		case 2:  /* JR/JALR: mode from bit 0 */
+		case 2:
+			/*  JR/JALR: mode determined by target bit 0  */
 			if (target & 1) {
 				cpu->pc = target & ~(uint64_t)1;
 			} else {
@@ -604,10 +600,23 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		return 1;
 	}
 
+	if (!cpu->cd.mips.mips16) {
+		fatal("mips_cpu_interpret_mips16_SLOW called when not in "
+		    "MIPS16 mode?\n");
+		cpu->running = 0;
+		return 0;
+	}
+
+
 	/*  Fetch the instruction  */
 	iw = m16_fetch(cpu, addr, &ok);
 	if (!ok) {
-		M16_MEM_EXCEPTION_CHECK();
+		if (cpu->cd.mips.coproc[0]->reg[COP0_STATUS] & STATUS_EXL)
+			return 1;
+		fatal("mips_cpu_interpret_mips16_SLOW(): could not read "
+		    "the instruction at 0x%" PRIx64 "\n", addr);
+		cpu->running = 0;
+		return 0;
 	}
 
 	op = (iw >> 11) & 0x1f;
@@ -618,7 +627,12 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		addr += 2;
 		iw = m16_fetch(cpu, addr, &ok);
 		if (!ok) {
-			M16_MEM_EXCEPTION_CHECK();
+			if (cpu->cd.mips.coproc[0]->reg[COP0_STATUS] & STATUS_EXL)
+				return 1;
+			fatal("mips_cpu_interpret_mips16_SLOW(): could not "
+			    "read extended instruction\n");
+			cpu->running = 0;
+			return 0;
 		}
 		op = (iw >> 11) & 0x1f;
 		extended = 1;
@@ -705,14 +719,13 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			int offset = iw & 0x7ff;
 			if (extended) {
 				offset = ((extend_word & 0x1f) << 11) |
-				    (((extend_word >> 5) & 0x3f) << 5) |
-				    (iw & 0x1f);
+				    (iw & 0x7ff);
 				offset = SIGN_EXTEND(offset, 16);
 			} else {
 				offset = SIGN_EXTEND(offset, 11);
 			}
 			offset <<= 1;
-			cpu->pc = cpu->pc + (extended ? 4 : 2) + offset;
+			cpu->pc = cpu->pc + 2 + offset;
 			return 1;
 		}
 
@@ -747,7 +760,12 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			/*  Fetch second halfword  */
 			lo_word = m16_fetch(cpu, cpu->pc + 2, &ok);
 			if (!ok) {
-				M16_MEM_EXCEPTION_CHECK();
+				if (cpu->cd.mips.coproc[0]->reg[COP0_STATUS] & STATUS_EXL)
+					return 1;
+				fatal("mips_cpu_interpret_mips16_SLOW(): "
+				    "could not read JAL second halfword\n");
+				cpu->running = 0;
+				return 0;
 			}
 
 			/*  Bit 10 of hi_word = X bit (JALX vs JAL)  */
@@ -766,18 +784,23 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			    ((uint32_t)((hi_word >> 5) & 0x1f) << 16) |
 			    lo_word;
 
-			/*  Link: RA = address after the 2-byte delay slot.  */
+			/*  Link: RA = address after the 2-byte delay slot
+			 *  (PC + 4 for the 32-bit JAL + 2 for delay slot).
+			 *  Set bit 0 to indicate MIPS16 return mode.  */
 			cpu->cd.mips.gpr[MIPS_GPR_RA] =
 			    (cpu->pc + 6) | 1;
 
-			/*  Save target for delay slot mechanism  */
+			/*  Compute target: 26-bit field shifted left 2  */
 			target <<= 2;
 			cpu->cd.mips.m16_delay_target =
 			    ((cpu->pc + 2) &
 			    ~(uint64_t)0x0fffffff) | target;
 			cpu->cd.mips.m16_delay_jalx = jalx;
 
-			/*  Advance PC to delay slot (PC + 4)  */
+			/*  Advance PC to delay slot (PC + 4).  The next
+			 *  interpreter call executes the delay slot, then
+			 *  the completion code at the top redirects to
+			 *  the branch target.  */
 			cpu->pc += 4;
 			cpu->delay_slot = TO_BE_DELAYED;
 
@@ -792,16 +815,14 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			int offset = iw & 0xff;
 			if (extended) {
 				offset = ((extend_word & 0x1f) << 11) |
-				    (((extend_word >> 5) & 0x3f) << 5) |
-				    (iw & 0x1f);
+				    (iw & 0x7ff);
 				offset = SIGN_EXTEND(offset, 16);
 			} else {
 				offset = SIGN_EXTEND(offset, 8);
 			}
 			offset <<= 1;
 			if (M16REG(rx) == 0) {
-				cpu->pc = cpu->pc +
-				    (extended ? 4 : 2) + offset;
+				cpu->pc = cpu->pc + 2 + offset;
 				return 1;
 			}
 		}
@@ -812,16 +833,14 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			int offset = iw & 0xff;
 			if (extended) {
 				offset = ((extend_word & 0x1f) << 11) |
-				    (((extend_word >> 5) & 0x3f) << 5) |
-				    (iw & 0x1f);
+				    (iw & 0x7ff);
 				offset = SIGN_EXTEND(offset, 16);
 			} else {
 				offset = SIGN_EXTEND(offset, 8);
 			}
 			offset <<= 1;
 			if (M16REG(rx) != 0) {
-				cpu->pc = cpu->pc +
-				    (extended ? 4 : 2) + offset;
+				cpu->pc = cpu->pc + 2 + offset;
 				return 1;
 			}
 		}
@@ -932,9 +951,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					int offset;
 					if (extended) {
 						offset = ((extend_word & 0x1f)
-						    << 11) |
-						    (((extend_word >> 5) & 0x3f)
-						    << 5) | (iw & 0x1f);
+						    << 11) | (iw & 0x7ff);
 						offset = SIGN_EXTEND(offset, 16);
 					} else {
 						offset = SIGN_EXTEND(imm8, 8);
@@ -942,8 +959,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					offset <<= 1;
 					if (cpu->cd.mips.gpr[MIPS_GPR_T8]
 					    == 0) {
-						cpu->pc = cpu->pc +
-						    (extended ? 4 : 2) +
+						cpu->pc = cpu->pc + 2 +
 						    offset;
 						return 1;
 					}
@@ -954,9 +970,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					int offset;
 					if (extended) {
 						offset = ((extend_word & 0x1f)
-						    << 11) |
-						    (((extend_word >> 5) & 0x3f)
-						    << 5) | (iw & 0x1f);
+						    << 11) | (iw & 0x7ff);
 						offset = SIGN_EXTEND(offset, 16);
 					} else {
 						offset = SIGN_EXTEND(imm8, 8);
@@ -964,8 +978,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					offset <<= 1;
 					if (cpu->cd.mips.gpr[MIPS_GPR_T8]
 					    != 0) {
-						cpu->pc = cpu->pc +
-						    (extended ? 4 : 2) +
+						cpu->pc = cpu->pc + 2 +
 						    offset;
 						return 1;
 					}
@@ -987,9 +1000,10 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					uint64_t a =
 					    cpu->cd.mips.gpr[MIPS_GPR_SP] +
 					    offset8;
-					if (!m16_store_word(cpu, a,
-					    cpu->cd.mips.gpr[MIPS_GPR_RA])) {
-						M16_MEM_EXCEPTION_CHECK();
+					{
+						int sw_ok = m16_store_word(cpu, a,
+						    cpu->cd.mips.gpr[MIPS_GPR_RA]);
+						M16_CHECK_MEM_OK(sw_ok);
 					}
 				}
 				break;
@@ -1016,15 +1030,16 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				{
 					/*
 					 *  MOV32R: move MIPS16 reg to
-					 *  MIPS32 reg.
-					 *  Encoding: r32[4:0] in bits [7:3],
-					 *  source ry[2:0] in bits [2:0].
+					 *  any MIPS32 register.
+					 *  [7:5] = MIPS16 source reg (ry)
+					 *  [4:0] = MIPS32 dest reg, bits
+					 *          REARRANGED: {[2:0],[4:3]}
 					 */
-					int r32 = (iw >> 3) & 0x1f;
-					int src = iw & 0x7;
+					int rz5 = iw & 0x1f;
+					int r32 = ((rz5 & 0x7) << 2) |
+					    (rz5 >> 3);
 					cpu->cd.mips.gpr[r32] =
-					    cpu->cd.mips.gpr[
-					    mips16_reg_map[src]];
+					    M16REG(ry);
 				}
 				break;
 			case M16_I8_MOVR32:
@@ -1048,6 +1063,9 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		{
 			int imm8 = iw & 0xff;
 			if (extended) {
+				/*  Register-immediate encoding:
+				 *  imm = extend[4:0]<<11 | extend[10:5]<<5 | iw[4:0]
+				 *  (NOT branch encoding which uses iw[10:0])  */
 				imm8 = ((extend_word & 0x1f) << 11) |
 				    ((extend_word >> 5) & 0x3f) << 5 |
 				    (iw & 0x1f);
@@ -1087,7 +1105,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_byte(cpu, a, &ok);
-			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
+			M16_CHECK_MEM_OK(ok);
 			M16REG(ry) = (int32_t)(int8_t)val;
 		}
 		break;
@@ -1108,7 +1126,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_half(cpu, a, &ok);
-			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
+			M16_CHECK_MEM_OK(ok);
 			M16REG(ry) = (int32_t)(int16_t)val;
 		}
 		break;
@@ -1129,7 +1147,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)
 			    cpu->cd.mips.gpr[MIPS_GPR_SP] + imm8);
 			val = m16_load_word(cpu, a, &ok);
-			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
+			M16_CHECK_MEM_OK(ok);
 			M16REG(rx) = (int32_t)val;
 		}
 		break;
@@ -1150,7 +1168,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_word(cpu, a, &ok);
-			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
+			M16_CHECK_MEM_OK(ok);
 			M16REG(ry) = (int32_t)val;
 		}
 		break;
@@ -1171,7 +1189,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_byte(cpu, a, &ok);
-			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
+			M16_CHECK_MEM_OK(ok);
 			M16REG(ry) = val;
 		}
 		break;
@@ -1192,7 +1210,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			val = m16_load_half(cpu, a, &ok);
-			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
+			M16_CHECK_MEM_OK(ok);
 			M16REG(ry) = val;
 		}
 		break;
@@ -1212,7 +1230,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			}
 			a = (cpu->pc & ~(uint64_t)3) + imm8;
 			val = m16_load_word(cpu, a, &ok);
-			if (!ok) { M16_MEM_EXCEPTION_CHECK(); }
+			M16_CHECK_MEM_OK(ok);
 			M16REG(rx) = (int32_t)val;
 		}
 		break;
@@ -1232,7 +1250,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			if (!m16_store_byte(cpu, a, M16REG(ry))) {
-				M16_MEM_EXCEPTION_CHECK();
+				cpu->running = 0;
+				return 0;
 			}
 		}
 		break;
@@ -1252,7 +1271,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			if (!m16_store_half(cpu, a, M16REG(ry))) {
-				M16_MEM_EXCEPTION_CHECK();
+				cpu->running = 0;
+				return 0;
 			}
 		}
 		break;
@@ -1272,7 +1292,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)
 			    cpu->cd.mips.gpr[MIPS_GPR_SP] + imm8);
 			if (!m16_store_word(cpu, a, M16REG(rx))) {
-				M16_MEM_EXCEPTION_CHECK();
+				cpu->running = 0;
+				return 0;
 			}
 		}
 		break;
@@ -1292,7 +1313,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
 			if (!m16_store_word(cpu, a, M16REG(ry))) {
-				M16_MEM_EXCEPTION_CHECK();
+				cpu->running = 0;
+				return 0;
 			}
 		}
 		break;
@@ -1327,25 +1349,28 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				uint64_t target;
 				/*
 				 *  MIPS16 JR/JALR share func=0.
-				 *  ry field [7:5] distinguishes them:
+				 *  The ry field [7:5] distinguishes them:
 				 *    ry=000: JR rx (no link)
 				 *    ry=010: JALR rx (link RA)
-				 *  When rx=0: JR $ra
+				 *  When rx=0: JR $ra (regardless of ry)
 				 */
 				int is_jalr = (ry == 2 && rx != 0);
 				if (rx == 0) {
+					/*  JR $ra  */
 					target = cpu->cd.mips.gpr[MIPS_GPR_RA];
 				} else {
 					target = M16REG(rx);
 				}
 				if (is_jalr) {
+					/*  JALR: link RA = PC + 4
+					 *  (PC+2 for insn + 2 for delay slot)  */
 					cpu->cd.mips.gpr[MIPS_GPR_RA] =
 					    (cpu->pc + 4) | 1;
 				}
-				/*  Both JR and JALR have a delay slot  */
+				/*  Both JR and JALR have a delay slot.  */
 				cpu->cd.mips.m16_delay_target = target;
-				cpu->cd.mips.m16_delay_jalx = 2;
-				cpu->pc += 2;
+				cpu->cd.mips.m16_delay_jalx = 2;  /* use bit 0 */
+				cpu->pc += 2;  /*  advance to delay slot  */
 				cpu->delay_slot = TO_BE_DELAYED;
 				if (!is_jalr && rx == 0 &&
 				    cpu->machine->show_trace_tree)
@@ -1359,15 +1384,15 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		case M16_RR_JALR:
 			{
 				uint64_t target = M16REG(rx);
-				/*  Link: RA = PC + 2, with MIPS16 bit  */
+				/*  Link: RA = PC + 4, with MIPS16 bit
+				 *  (PC+2 for JR insn + 2 for delay slot)  */
 				cpu->cd.mips.gpr[MIPS_GPR_RA] =
-				    (cpu->pc + 2) | 1;
-				if (target & 1) {
-					cpu->pc = target & ~(uint64_t)1;
-				} else {
-					cpu->cd.mips.mips16 = 0;
-					cpu->pc = target;
-				}
+				    (cpu->pc + 4) | 1;
+				/*  JALR has a one-instruction delay slot.  */
+				cpu->cd.mips.m16_delay_target = target;
+				cpu->cd.mips.m16_delay_jalx = 2;  /* JR/JALR: use bit 0 */
+				cpu->pc += 2;  /*  advance to delay slot  */
+				cpu->delay_slot = TO_BE_DELAYED;
 				if (cpu->machine->show_trace_tree)
 					cpu_functioncall_trace(cpu, cpu->pc);
 				return 1;
@@ -1485,7 +1510,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 	else
 		cpu->pc += 2;
 
-	/*  Transition delay slot state  */
+	/*  Transition delay slot state: after executing the delay
+	 *  slot instruction, the next call will redirect to target.  */
 	if (cpu->delay_slot == TO_BE_DELAYED)
 		cpu->delay_slot = DELAYED;
 

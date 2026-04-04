@@ -38,6 +38,7 @@
 #include "machine.h"
 #include "memory.h"
 #include "misc.h"
+#include "wince_boot.h"
 
 
 extern int verbose;
@@ -110,6 +111,18 @@ void memory_writemax64(struct cpu *cpu, unsigned char *buf, int len,
 
 
 /*
+ *  On Android, steer GXemul's mmap allocations away from the system library
+ *  address range (~0x7300000000000) by using a hint in the safe 8GB region.
+ *  Without this, the first memblock mmap(NULL,...) can land on top of
+ *  libhwui.so's BSS, corrupting its mutexes.
+ */
+#ifdef __ANDROID__
+#define GXEMUL_MMAP_HINT  ((void *)0x200000000UL)   /* 8 GB — safe range */
+#else
+#define GXEMUL_MMAP_HINT  NULL
+#endif
+
+/*
  *  zeroed_alloc():
  *
  *  Allocates a block of memory using mmap(), and if that fails, try
@@ -117,7 +130,7 @@ void memory_writemax64(struct cpu *cpu, unsigned char *buf, int len,
  */
 void *zeroed_alloc(size_t s)
 {
-	void *p = mmap(NULL, s, PROT_READ | PROT_WRITE,
+	void *p = mmap(GXEMUL_MMAP_HINT, s, PROT_READ | PROT_WRITE,
 	    MAP_ANON | MAP_PRIVATE, -1, 0);
 
 	if (p == NULL) {
@@ -167,7 +180,7 @@ struct memory *memory_new(uint64_t physical_max)
 
 	s = entries_per_pagetable * sizeof(void *);
 
-	mem->pagetable = (unsigned char *) mmap(NULL, s,
+	mem->pagetable = (unsigned char *) mmap(GXEMUL_MMAP_HINT, s,
 	    PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
 	if (mem->pagetable == NULL) {
 		CHECK_ALLOCATION(mem->pagetable = malloc(s));
@@ -527,7 +540,7 @@ unsigned char *memory_paddr_to_hostaddr(struct memory *mem,
 
 		/*  Anonymous mmap() should return zero-filled memory,
 		    try malloc + memset if mmap failed.  */
-		table[entry] = (void *) mmap(NULL, alloclen,
+		table[entry] = (void *) mmap(GXEMUL_MMAP_HINT, alloclen,
 		    PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
 		if (table[entry] == NULL) {
 			CHECK_ALLOCATION(table[entry] = malloc(alloclen));
@@ -553,6 +566,9 @@ unsigned char *memory_paddr_to_hostaddr(struct memory *mem,
 bool memory_warn_about_unimplemented_addr(struct cpu *cpu, struct memory *mem,
 	int writeflag, uint64_t paddr, size_t len)
 {
+	if (writeflag == MEM_WRITE)
+		wince_boot_note_fb_oob(cpu, paddr, len);
+
 	/*
 	 *  HACK: This allows guest OS kernels to probe memory a few KBs past
 	 *  the end of memory, without giving too many warnings.
@@ -964,4 +980,3 @@ void store_16bit_word_in_host(struct cpu *cpu,
 		int tmp = data[0]; data[0] = data[1]; data[1] = tmp;
 	}
 }
-

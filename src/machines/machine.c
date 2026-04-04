@@ -87,8 +87,6 @@ struct machine *machine_new(char *name, struct emul *emul, int id)
 	m->byte_order_override = NO_BYTE_ORDER_OVERRIDE;
 	m->boot_kernel_filename = strdup("");
 	m->boot_string_argument = NULL;
-	m->x11_md.scaledown = 1;
-	m->x11_md.scaleup = 1;
 	m->n_gfx_cards = 1;
 	symbol_init(&m->symbol_context);
 
@@ -440,22 +438,6 @@ void machine_dumpinfo(struct machine *m)
 	if (m->ncpus > 1)
 		debug("Bootstrap cpu is nr %i\n", m->bootstrap_cpu);
 
-	if (m->x11_md.in_use) {
-		debug("Using X11");
-		if (m->x11_md.scaledown > 1)
-			debug(", scaledown %i", m->x11_md.scaledown);
-		if (m->x11_md.scaleup > 1)
-			debug(", scaleup %i", m->x11_md.scaleup);
-		if (m->x11_md.n_display_names > 0) {
-			for (i=0; i<m->x11_md.n_display_names; i++) {
-				debug(i? ", " : " (");
-				debug("\"%s\"", m->x11_md.display_names[i]);
-			}
-			debug(")");
-		}
-		debug("\n");
-	}
-
 	diskimage_dump_info(m);
 
 	if (m->force_netboot)
@@ -655,6 +637,83 @@ void machine_default_cputype(struct machine *m)
 		    m->machine_type, m->machine_subtype);
 		exit(1);
 	}
+}
+
+
+/*****************************************************************************/
+
+
+/*
+ *  machine_run():
+ *
+ *  Run one or more instructions on all CPUs in this machine. (Usually,
+ *  around N_SAFE_DYNTRANS_LIMIT instructions will be run by the dyntrans
+ *  system.)
+ *
+ *  Return value is true if any CPU in this machine is still running,
+ *  false if all CPUs are stopped.
+ */
+bool machine_run(struct machine *machine)
+{
+	struct cpu **cpus = machine->cpus;
+	int ncpus = machine->ncpus;
+	bool any_running = false;
+
+	for (int i=0; i<ncpus; i++) {
+		if (cpus[i]->running) {
+			any_running = true;
+			int was_mips16 = cpus[i]->cd.mips.mips16;
+			uint64_t pc_before = cpus[i]->pc;
+		    me->set_default_cpu != NULL) {
+			me->set_default_cpu(m);
+			break;
+		}
+		me = me->next;
+	}
+
+	if (m->cpu_name == NULL) {
+		fprintf(stderr, "machine_default_cputype(): no default"
+		    " cpu for machine type %i subtype %i\n",
+		    m->machine_type, m->machine_subtype);
+		exit(1);
+	}
+}
+
+
+/*****************************************************************************/
+
+
+/*
+ *  machine_run():
+ *
+ *  Run one or more instructions on all CPUs in this machine. (Usually,
+ *  around N_SAFE_DYNTRANS_LIMIT instructions will be run by the dyntrans
+ *  system.)
+ *
+ *  Return value is true if any CPU in this machine is still running,
+ *  false if all CPUs are stopped.
+ */
+bool machine_run(struct machine *machine)
+{
+	struct cpu **cpus = machine->cpus;
+	int ncpus = machine->ncpus;
+	bool any_running = false;
+
+	for (int i=0; i<ncpus; i++) {
+		if (cpus[i]->running) {
+			any_running = true;
+			cpus[i]->run_instr(cpus[i]);
+			if (!cpus[i]->running) {
+				fprintf(stderr,
+				    "[MACHINE_RUN] cpu%d stopped after"
+				    " run_instr: before_pc=0x%08" PRIx64
+				    " after_pc=0x%08" PRIx64
+				    " was_m16=%d now_m16=%d\n",
+				    i, pc_before,
+				    (uint64_t)cpus[i]->pc,
+				    was_mips16,
+				    cpus[i]->cd.mips.mips16);
+			}
 }
 
 

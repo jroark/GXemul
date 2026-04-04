@@ -77,16 +77,19 @@ MACHINE_SETUP(hpcmips)
 		hpc_fb_ysize = 320;
 		hpc_fb_xsize_mem = 256;
 		hpc_fb_ysize_mem = 320;
-		hpc_fb_bits = 15;
+		hpc_fb_bits = 16;
 		hpc_fb_encoding = BIFB_D16_0000;
 
-		/*  TODO: irq?  */
-		snprintf(tmpstr, sizeof(tmpstr), "ns16550 irq=0 addr=0x"
-		    "0a008680 addr_mult=4 in_use=%i", !machine->x11_md.in_use);
+		dev_vr41xx_init(machine, machine->memory, 4131);
+
+		/*  VRC4173 companion chip SIU (active console)  */
+		snprintf(tmpstr, sizeof(tmpstr), "ns16550 irq=%s.cpu[%i]"
+		    ".vrip.%i addr=0x0a008680 addr_mult=4 in_use=%i"
+		    " name2=vrc4173siu",
+		    machine->path, machine->bootstrap_cpu,
+		    VRIP_INTR_SIU, 1 /* always active (serial console) */);
 		machine->main_console_handle = (size_t)
 		    device_add(machine, tmpstr);
-
-		dev_vr41xx_init(machine, machine->memory, 4131);
 
 		hpc_platid_cpu_arch = 1;	/*  MIPS  */
 		hpc_platid_cpu_series = 1;	/*  VR  */
@@ -109,12 +112,6 @@ MACHINE_SETUP(hpcmips)
 		hpc_fb_ysize_mem = 320;
 		hpc_fb_bits = 16;
 		hpc_fb_encoding = BIFB_D16_0000;
-
-		/*  TODO: irq?  */
-		snprintf(tmpstr, sizeof(tmpstr), "ns16550 irq=0 addr=0x"
-		    "0a008680 addr_mult=4 in_use=%i", !machine->x11_md.in_use);
-		machine->main_console_handle = (size_t)
-		    device_add(machine, tmpstr);
 
 		dev_vr41xx_init(machine, machine->memory, 4121);
 
@@ -242,8 +239,7 @@ MACHINE_SETUP(hpcmips)
 			    "ns16550 irq=%i addr=0x0c000010", 8+VRIP_INTR_SIU);
 			x = (size_t)device_add(machine, tmpstr);
 
-			if (!machine->x11_md.in_use)
-				machine->main_console_handle = x;
+			machine->main_console_handle = x;
 		}
 
 		hpc_platid_cpu_arch = 1;	/*  MIPS  */
@@ -296,7 +292,8 @@ MACHINE_SETUP(hpcmips)
 	    + (hpc_platid_model <<  8) + hpc_platid_submodel);
 
 	if (hpc_fb_addr != 0) {
-		dev_fb_init(machine, machine->memory, hpc_fb_addr, VFB_HPC,
+		machine->fb = dev_fb_init(machine, machine->memory,
+		    hpc_fb_addr, VFB_HPC,
 		    hpc_fb_xsize, hpc_fb_ysize,
 		    hpc_fb_xsize_mem, hpc_fb_ysize_mem,
 		    hpc_fb_bits, machine->machine_name);
@@ -305,6 +302,19 @@ MACHINE_SETUP(hpcmips)
 		    address 0x8.......:  */
 		dev_ram_init(machine, 0x80000000, 0x20000000,
 		    DEV_RAM_MIRROR | DEV_RAM_MIGHT_POINT_TO_DEVICES, 0x0, NULL);
+
+		/*  Linux sfb.c uses kseg1 VA (0xAA200000) as smem_start.
+		    When fbmem.c passes this to remap_page_range/mk_pte_phys,
+		    bit 29 leaks into the physical address (PA 0x2A200000).
+		    Real VR4131 bus masks PA to 29 bits; add a mirror:  */
+		dev_ram_init(machine, 0x20000000, 0x20000000,
+		    DEV_RAM_MIRROR | DEV_RAM_MIGHT_POINT_TO_DEVICES, 0x0, NULL);
+
+		/*  ROM MIPS16 boot dispatcher uses stack at PA 0x09100000
+		    (VA 0xA9100000 kseg1).  This may be VRC4173 on-chip SRAM
+		    or an external bus region.  Map 8KB of RAM there.  */
+		dev_ram_init(machine, 0x09100000, 0x2000,
+		    DEV_RAM_RAM, 0, NULL);
 	}
 
 	if (!machine->prom_emulation)
@@ -345,9 +355,8 @@ MACHINE_SETUP(hpcmips)
 		    "res:240,bpp:4,gray,hpck:3084,inv ether=0,0x03fe0300,eth0");
 		tmp[tmplen-1] = '\0';
 
-		if (!machine->x11_md.in_use)
-			snprintf(tmp+strlen(tmp), tmplen-strlen(tmp),
-			    " console=ttyS0,115200");
+		snprintf(tmp+strlen(tmp), tmplen-strlen(tmp),
+		    " console=ttyS0,115200");
 		tmp[tmplen-1] = '\0';
 
 		if (machine->boot_string_argument[0])
@@ -389,7 +398,7 @@ MACHINE_SETUP(hpcmips)
 	store_16bit_word_in_host(cpu, (unsigned char *)&hpc_bootinfo.fb_type,
 	    hpc_fb_encoding);
 	store_16bit_word_in_host(cpu, (unsigned char *)&hpc_bootinfo.bi_cnuse,
-	    machine->x11_md.in_use? BI_CNUSE_BUILTIN : BI_CNUSE_SERIAL);
+	    BI_CNUSE_SERIAL);
 
 	/*  printf("hpc_bootinfo.platid_cpu     = 0x%08x\n",
 	    hpc_bootinfo.platid_cpu);

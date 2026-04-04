@@ -72,6 +72,7 @@
 #include <sys/types.h>
 #include <time.h>
 
+#include "host_io.h"
 #include "console.h"
 #include "emul.h"
 #include "machine.h"
@@ -92,7 +93,7 @@ static int console_slave_outputd;
 
 static int console_initialized = 0;
 static struct settings *console_settings = NULL;
-static int console_stdout_pending;
+/* console_stdout_pending removed — console_putchar now flushes immediately */
 
 #define	CONSOLE_FIFO_LEN	4096
 
@@ -104,8 +105,6 @@ static int console_mouse_fb_nr;		/*  framebuffer number of
 static int console_mouse_buttons;	/*  left=4, middle=2, right=1  */
 
 static int allow_slaves = 0;
-static int console_stdin_eof = 0;
-static int console_is_tty = 0;
 
 struct console_handle {
 	int		in_use;
@@ -145,7 +144,7 @@ void console_deinit_main(void)
 	if (!console_initialized)
 		return;
 
-	if (console_is_tty)
+	if (isatty(STDIN_FILENO))
 		tcsetattr(STDIN_FILENO, TCSANOW, &console_oldtermios);
 
 	console_initialized = 0;
@@ -163,11 +162,12 @@ void console_deinit_main(void)
  */
 void console_sigcont(int x)
 {
-	if (!console_initialized || !console_is_tty)
+	if (!console_initialized)
 		return;
 
 	/*  Make sure that the correct (current) termios setting is active:  */
-	tcsetattr(STDIN_FILENO, TCSANOW, &console_curtermios);
+	if (isatty(STDIN_FILENO))
+		tcsetattr(STDIN_FILENO, TCSANOW, &console_curtermios);
 
 	/*  Reset the signal handler:  */
 	signal(SIGCONT, console_sigcont);
@@ -281,11 +281,10 @@ static void start_xterm(int handle)
  */
 static int d_avail(int d)
 {
-	fd_set rfds;
-	struct timeval tv;
-	int retries = 0;
-
 	for (;;) {
+		fd_set rfds;
+		struct timeval tv;
+
 		FD_ZERO(&rfds);
 		FD_SET(d, &rfds);
 		tv.tv_sec = 0;
@@ -294,10 +293,7 @@ static int d_avail(int d)
 		int r = select(d+1, &rfds, NULL, NULL, &tv);
 		if (r >= 0)
 			return r;
-
-		/* Retry on EINTR, but give up on other errors or
-		   after too many retries.  */
-		if (errno != EINTR || ++retries > 3)
+		if (errno != EINTR)
 			return 0;
 	}
 }
@@ -328,13 +324,24 @@ void console_makeavail(int handle, char ch)
  *  Returns 1 if a char is available from a handle's read descriptor,
  *  0 otherwise.
  */
+static int stdin_eof = 0;
+
 static int console_stdin_avail(int handle)
 {
+#ifdef __EMSCRIPTEN__
+	/*
+	 * The browser build has no host stdin. Touch/buttons are injected
+	 * through BE-300-specific MMIO state, so probing stdin here only
+	 * triggers unsupported poll/select stream syscalls in Emscripten.
+	 */
+	(void)handle;
+	return 0;
+#else
 	if (!console_handles[handle].in_use_for_input)
 		return 0;
 
 	if (!allow_slaves) {
-		if (console_stdin_eof)
+		if (stdin_eof)
 			return 0;
 		return d_avail(STDIN_FILENO);
 	}
@@ -344,6 +351,7 @@ static int console_stdin_avail(int handle)
 		return 0;
 
 	return d_avail(console_handles[handle].r_descriptor);
+#endif
 }
 
 
@@ -384,9 +392,8 @@ int console_charavail(int handle)
 		len = read(d, ch, sizeof(ch));
 
 		if (len <= 0) {
-			/* EOF or error: stop polling this descriptor. */
-			if (!allow_slaves)
-				console_stdin_eof = 1;
+			if (d == STDIN_FILENO)
+				stdin_eof = 1;
 			break;
 		}
 
@@ -472,56 +479,34 @@ int console_readchar(int handle)
 /*
  *  console_putchar():
  *
- *  Prints a char to stdout, and sets the console_stdout_pending flag.
+ *  Emits a character to the host_io serial sink (for UI ring buffer)
+ *  and to stdout (for command-line capture).  Flushes immediately so
+ *  redirected stdout survives process termination.
  */
 void console_putchar(int handle, int ch)
 {
-	char buf[1];
-
 	if (!console_handles[handle].in_use_for_input &&
 	    !console_handles[handle].outputonly)
 		console_change_inputability(handle, 1);
 
-	if (!allow_slaves) {
-		/*  stdout:  */
+	host_io_emit_serial(ch);
+
+	if (host_io_stdout_enabled()) {
 		putchar(ch);
-
-		/*  Assume flushes by OS or libc on newlines:  */
-		if (ch == '\n')
-			console_stdout_pending = 0;
-		else
-			console_stdout_pending = 1;
-
-		return;
+		fflush(stdout);
 	}
-
-	if (!console_handles[handle].in_use) {
-		printf("[ console_putchar(): handle %i not in"
-		    " use! ]\n", handle);
-		return;
-		}
-
-	if (console_handles[handle].using_xterm ==
-	    USING_XTERM_BUT_NOT_YET_OPEN)
-		start_xterm(handle);
-
-	buf[0] = ch;
-	if (write(console_handles[handle].w_descriptor, buf, 1) != 1)
-		perror("error writing to console handle");
 }
 
 
 /*
  *  console_flush():
  *
- *  Flushes stdout, if necessary, and resets console_stdout_pending to zero.
+ *  Flushes stdout unconditionally.
  */
 void console_flush(void)
 {
-	if (console_stdout_pending)
+	if (host_io_stdout_enabled())
 		fflush(stdout);
-
-	console_stdout_pending = 0;
 }
 
 
@@ -856,51 +841,32 @@ int console_change_inputability(int handle, int inputability)
  *
  *  Puts the host's console into single-character (non-canonical) mode.
  */
+/*
+ *  console_sigterm():
+ *
+ *  Restore terminal settings on SIGTERM (e.g. from timeout(1)).
+ */
+static void console_sigterm(int sig)
+{
+	(void)sig;
+	console_deinit_main();
+	_exit(124);
+}
+
+
 void console_init_main(struct emul *emul)
 {
-	int i, tra;
+	(void)emul;
 
 	if (console_initialized)
 		return;
 
-	console_is_tty = isatty(STDIN_FILENO);
+	/*
+	 *  Skip raw terminal mode — we don't need single-char input and
+	 *  disabling ECHO/ICANON corrupts the caller's terminal.
+	 *  No SIGTERM handler needed since we don't modify terminal state.
+	 */
 
-	if (console_is_tty) {
-		tcgetattr(STDIN_FILENO, &console_oldtermios);
-		memcpy(&console_curtermios, &console_oldtermios,
-		    sizeof (struct termios));
-
-		console_curtermios.c_lflag &= ~ICANON;
-		console_curtermios.c_cc[VTIME] = 0;
-		console_curtermios.c_cc[VMIN] = 1;
-
-		console_curtermios.c_lflag &= ~ECHO;
-
-		/*
-		 *  Most guest OSes seem to work ok without ~ICRNL, but
-		 *  Linux on DECstation requires it to be usable.
-		 *  Unfortunately, clearing out ICRNL makes tracing with
-		 *  '-t ... |more' akward, as you might need to use
-		 *  CTRL-J instead of the enter key.  Hence, this bit is
-		 *  only cleared if we're not tracing:
-		 */
-		tra = 0;
-		for (i=0; i<emul->n_machines; i++)
-			if (emul->machines[i]->show_trace_tree ||
-			    emul->machines[i]->instruction_trace ||
-			    emul->machines[i]->register_dump)
-				tra = 1;
-		if (!tra)
-			console_curtermios.c_iflag &= ~ICRNL;
-
-		tcsetattr(STDIN_FILENO, TCSANOW, &console_curtermios);
-	}
-
-	/*  Force line-buffered stdout when redirected to a file.  */
-	if (!isatty(STDOUT_FILENO))
-		setvbuf(stdout, NULL, _IOLBF, 0);
-
-	console_stdout_pending = 1;
 	console_handles[MAIN_CONSOLE].fifo_head = 0;
 	console_handles[MAIN_CONSOLE].fifo_tail = 0;
 
@@ -1073,4 +1039,3 @@ void console_deinit(void)
 	settings_remove(console_settings, "allow_slaves");
 	settings_remove(global_settings, "console");
 }
-

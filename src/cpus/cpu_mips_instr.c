@@ -2349,15 +2349,7 @@ X(eret)
 	cpu->cd.mips.mips16 = (cpu->pc & 1) ? 1 : 0;
 	cpu->pc &= ~(uint64_t)1;
 
-	if (cpu->cd.mips.mips16) {
-		/*  Drain the IC loop — the page may have stale MIPS32
-		 *  translations.  The MIPS16 slow interpreter will take
-		 *  over on the next dyntrans entry.  */
-		cpu->cd.mips.next_ic = &nothing_call;
-		cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
-	} else {
-		quick_pc_to_pointers(cpu);
-	}
+	quick_pc_to_pointers(cpu);
 
 	cpu->cd.mips.rmw = 0;   /*  the "LL bit"  */
 }
@@ -4346,8 +4338,25 @@ X(to_be_translated)
 				}
 				break;
 			case COP0_HIBERNATE:
-				/*  TODO  */
-				goto bad;
+				/*  VR41xx hibernate: deepest sleep, wakes
+				    only on cold reset.  Treat as wait so
+				    execution halts until an interrupt
+				    arrives or a machine-level hook
+				    redirects PC.  */
+				ic->f = instr(wait);
+				if (cpu->cd.mips.cpu_type.rev != MIPS_R4100) {
+					static int warned = 0;
+					ic->f = instr(reserved);
+					if (!warned &&
+					    !cpu->translation_readahead) {
+						fatal("{ WARNING: Attempt to "
+						    "execute a R41xx instruct"
+					            "ion, but the emulated CPU "
+						    "doesn't support it! }\n");
+						warned = 1;
+					}
+				}
+				break;
 			case COP0_SUSPEND:
 				/*  Used by NetBSD on HPCmips (VR41xx) to
 				    halt the machine.  */

@@ -125,6 +125,24 @@ void timer_remove(struct timer *t)
 
 
 /*
+ *  timer_remove_all():
+ *
+ *  Remove and free all timers. Used before re-initializing the machine so
+ *  that stale timer callbacks from the previous run do not fire.
+ */
+void timer_remove_all(void)
+{
+	struct timer *t = first_timer;
+	while (t != NULL) {
+		struct timer *next = t->next;
+		free(t);
+		t = next;
+	}
+	first_timer = NULL;
+}
+
+
+/*
  *  timer_update_frequency():
  *
  *  Changes the frequency of an existing timer.
@@ -197,6 +215,20 @@ static void timer_tick(int signal_nr)
 #endif
 }
 
+void timer_reset_state(void)
+{
+	struct timer *timer = first_timer;
+
+	gettimeofday(&timer_start_tv, NULL);
+	timer_current_time = 0.0;
+	timer_countdown_to_next_gettimeofday = 0;
+
+	while (timer != NULL) {
+		timer->next_tick_at = timer->interval;
+		timer = timer->next;
+	}
+}
+
 
 /*
  *  timer_start():
@@ -205,7 +237,6 @@ static void timer_tick(int signal_nr)
  */
 void timer_start(void)
 {
-	struct timer *timer = first_timer;
 	struct itimerval val;
 	struct sigaction saction;
 
@@ -213,15 +244,7 @@ void timer_start(void)
 		return;
 
 	timer_is_running = 1;
-
-	gettimeofday(&timer_start_tv, NULL);
-	timer_current_time = 0.0;
-
-	/*  Reset all timers:  */
-	while (timer != NULL) {
-		timer->next_tick_at = timer->interval;
-		timer = timer->next;
-	}
+	timer_reset_state();
 	val.it_interval.tv_sec = 0;
 	val.it_interval.tv_usec = (int) (1000000.0 / timer_freq);
 	val.it_value.tv_sec = 0;
@@ -265,6 +288,11 @@ void timer_stop(void)
 	sigaction(SIGALRM, &saction, NULL);
 }
 
+void timer_tick_manual(void)
+{
+	timer_tick(0);
+}
+
 
 #ifdef TEST
 static void timer_tick_test(struct timer *t, void *extra)
@@ -298,4 +326,3 @@ void timer_init(void)
 		sleep(999999);
 #endif
 }
-

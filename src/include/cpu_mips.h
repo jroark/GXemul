@@ -233,6 +233,11 @@ struct mips_cpu {
 	struct interrupt irq_compare;
 	struct timer	*timer;
 
+	/*  MIPS16 compact encoding mode:  */
+	int		mips16;		/*  1 = currently in MIPS16 mode  */
+	uint64_t	m16_delay_target;  /*  JAL/JALX target (pending delay slot)  */
+	int		m16_delay_jalx;    /*  1 = pending JALX (switch to MIPS32)  */
+
 	/*  Read-Modify-Write (LL/SC):  */
 	int		rmw;		/*  1 = currently active  */
 	uint64_t	rmw_len;	/*  Length of rmw modification  */

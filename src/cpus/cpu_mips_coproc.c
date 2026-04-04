@@ -48,6 +48,33 @@
 
 static const char *cop0_names[] = COP0_NAMES;
 static const char *regnames[] = MIPS_REGISTER_NAMES;
+static int g_warned_dyntrans_1kb_pages = 0;
+
+static void warn_dyntrans_1kb_page(struct cpu *cpu, const char *phase,
+	int index, uint64_t pagemask, uint64_t entryhi, uint64_t entrylo0,
+	uint64_t entrylo1)
+{
+	if (g_warned_dyntrans_1kb_pages >= 4)
+		return;
+
+	fatal("[ dyntrans-1kb-tlb phase=%s cpu=%i pc=0x%016llx index=0x%02x"
+	    " pagemask=0x%08llx entryhi=0x%08llx entrylo0=0x%08llx"
+	    " entrylo1=0x%08llx epc=0x%08llx status=0x%08llx"
+	    " cause=0x%08llx badva=0x%08llx ]\n",
+	    phase ? phase : "-",
+	    cpu ? cpu->cpu_id : -1,
+	    (long long)(cpu ? cpu->pc : 0ULL),
+	    index,
+	    (long long)pagemask,
+	    (long long)entryhi,
+	    (long long)entrylo0,
+	    (long long)entrylo1,
+	    (long long)(cpu ? cpu->cd.mips.coproc[0]->reg[COP0_EPC] : 0ULL),
+	    (long long)(cpu ? cpu->cd.mips.coproc[0]->reg[COP0_STATUS] : 0ULL),
+	    (long long)(cpu ? cpu->cd.mips.coproc[0]->reg[COP0_CAUSE] : 0ULL),
+	    (long long)(cpu ? cpu->cd.mips.coproc[0]->reg[COP0_BADVADDR] : 0ULL));
+	g_warned_dyntrans_1kb_pages ++;
+}
 
 
 /*
@@ -587,68 +614,41 @@ void coproc_register_read(struct cpu *cpu,
 	if (cp->coproc_nr==0 && reg_nr==COP0_WIRED)	unimpl = 0;
 	if (cp->coproc_nr==0 && reg_nr==COP0_BADVADDR)	unimpl = 0;
 	if (cp->coproc_nr==0 && reg_nr==COP0_COUNT) {
-		/*  TODO: Increase count in a more meaningful way!  */
-		cp->reg[COP0_COUNT] = (int32_t) (cp->reg[COP0_COUNT] + 1);
+		/*
+		 *  Return Count that reflects instructions executed so far
+		 *  in the current dyntrans batch, rather than just +1 per
+		 *  read. This makes the calibration loop work correctly:
+		 *  Count advances at instruction rate, not at MFC0 rate.
+		 *
+		 *  n_translated_instrs tracks instructions executed since
+		 *  the start of the current batch. We add this to the
+		 *  stored Count (which is updated at batch boundaries).
+		 */
+		int32_t base_count = (int32_t) cp->reg[COP0_COUNT];
+		int32_t actual_count = base_count +
+		    cpu->n_translated_instrs -
+		    cpu->cd.mips.count_register_read_count;
+
+		/*  Each read should still show forward progress  */
 		cpu->cd.mips.count_register_read_count ++;
-		unimpl = 0;
-	}
-	if (cp->coproc_nr==0 && reg_nr==COP0_ENTRYHI)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_COMPARE)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_STATUS)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_CAUSE)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_EPC)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_PRID)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_CONFIG) {
-		if (select > 0) {
-			switch (select) {
-			case 1:	*ptr = cpu->cd.mips.cop0_config_select1;
-				break;
-			default:fatal("coproc_register_read(): unimplemented"
-				    " config register select %i\n", select);
-				exit(1);
+
+		/*  Return the actual count as the register value  */
+		cp->reg[COP0_COUNT] = (int64_t)(int32_t) actual_count;
+
+		/*
+		 *  Check if Count crossed Compare mid-batch.
+		 *  The kernel's calibration loop reads Count in a tight
+		 *  loop and writes Compare before the dyntrans batch ends,
+		 *  so the end-of-batch crossing check never fires.
+		 */
+		if (cpu->cd.mips.compare_register_set) {
+			int32_t compare = (int32_t) cp->reg[COP0_COMPARE];
+			if ((compare - base_count) > 0 &&
+			    (compare - actual_count) <= 0) {
+				INTERRUPT_ASSERT(cpu->cd.mips.irq_compare);
 			}
-			return;
 		}
-		unimpl = 0;
-	}
-	if (cp->coproc_nr==0 && reg_nr==COP0_LLADDR)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_WATCHLO)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_WATCHHI)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_XCONTEXT)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_ERRCTL)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_CACHEERR)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_TAGDATA_LO)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_TAGDATA_HI)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_ERROREPC)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_RESERV22) {
-		/*  Used by Linux on Linksys WRT54G  */
-		unimpl = 0;
-	}
-	if (cp->coproc_nr==0 && reg_nr==COP0_DEBUG)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_PERFCNT)	unimpl = 0;
-	if (cp->coproc_nr==0 && reg_nr==COP0_DESAVE)	unimpl = 0;
 
-	if (cp->coproc_nr==1)	unimpl = 0;
-
-	if (unimpl) {
-		fatal("cpu%i: warning: read from unimplemented coproc%i"
-		    " register %i (%s)\n", cpu->cpu_id, cp->coproc_nr, reg_nr,
-		    cp->coproc_nr==0? cop0_names[reg_nr] : "?");
-
-		mips_cpu_exception(cpu, EXCEPTION_CPU, 0, 0,
-		    cp->coproc_nr, 0, 0, 0);
-		return;
-	}
-
-	*ptr = cp->reg[reg_nr];
-}
-
-
-/*
- *  coproc_register_write();
- *
- *  Write a value to a MIPS coprocessor register.
- */
 void coproc_register_write(struct cpu *cpu,
 	struct mips_coproc *cp, int reg_nr, uint64_t *ptr, int flag64,
 	int select)
@@ -1735,8 +1735,12 @@ void coproc_tlbwri(struct cpu *cpu, int randomflag)
 			if (dpmask == 0x7ff) {
 				if (cp->tlbs[index].lo0 & ENTRYLO_V ||
 				    cp->tlbs[index].lo1 & ENTRYLO_V) {
-					fatal("1KB pages don't work with dyntrans.\n");
-					exit(1);
+					warn_dyntrans_1kb_page(cpu, "invalidate-old",
+					    index, cp->tlbs[index].mask,
+					    cp->tlbs[index].hi, cp->tlbs[index].lo0,
+					    cp->tlbs[index].lo1);
+					cpu->invalidate_translation_caches(cpu, 0,
+					    INVALIDATE_ALL);
 				}
 			}
 
@@ -1862,8 +1866,11 @@ void coproc_tlbwri(struct cpu *cpu, int randomflag)
 		if (dpmask == 0x7ff) {
 			if (cp->tlbs[index].lo0 & ENTRYLO_V ||
 			    cp->tlbs[index].lo1 & ENTRYLO_V) {
-				fatal("1KB pages don't work with dyntrans.\n");
-				exit(1);
+				warn_dyntrans_1kb_page(cpu, "write-new", index,
+				    cp->reg[COP0_PAGEMASK], cp->reg[COP0_ENTRYHI],
+				    cp->reg[COP0_ENTRYLO0], cp->reg[COP0_ENTRYLO1]);
+				cpu->invalidate_translation_caches(cpu, 0,
+				    INVALIDATE_ALL);
 			}
 		}
 
@@ -2285,4 +2292,3 @@ void coproc_function(struct cpu *cpu, struct mips_coproc *cp, int cpnr,
 
 	mips_cpu_exception(cpu, EXCEPTION_CPU, 0, 0, cp->coproc_nr, 0, 0, 0);
 }
-

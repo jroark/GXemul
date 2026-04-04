@@ -61,6 +61,9 @@ int TRANSLATE_ADDRESS(struct cpu *cpu, uint64_t vaddr,
 	int no_exceptions = flags & FLAG_NOEXCEPTIONS;
 	int ksu, use_tlb, status, i;
 	uint64_t vaddr_vpn2=0, vaddr_asid=0;
+#ifndef V2P_MMU3K
+	uint64_t exception_vpn2 = 0;
+#endif
 	int exccode, tlb_refill;
 	struct mips_coproc *cp0;
 
@@ -75,7 +78,13 @@ int TRANSLATE_ADDRESS(struct cpu *cpu, uint64_t vaddr,
 	uint64_t xuseg_top = ENTRYHI_VPN2_MASK_R10K | 0x1fffULL;
 #else
 #ifdef V2P_MMU4100
-	const uint64_t vpn2_mask = ENTRYHI_R_MASK | ENTRYHI_VPN2_MASK | 0x1800;
+	/*
+	 * VR41xx CPUs can encode 1KB pages via the low EntryHi bits, but this
+	 * emulator path only supports 4KB and larger pages. For the supported
+	 * page sizes, match VPN2 using the standard mask so 4KB entries such as
+	 * 0xFFFFC000 correctly cover 0xFFFFC800..0xFFFFCFFF.
+	 */
+	const uint64_t vpn2_mask = ENTRYHI_R_MASK | ENTRYHI_VPN2_MASK;
 #else
 	const uint64_t vpn2_mask = ENTRYHI_R_MASK | ENTRYHI_VPN2_MASK;
 #endif
@@ -246,6 +255,21 @@ int TRANSLATE_ADDRESS(struct cpu *cpu, uint64_t vaddr,
 #ifndef V2P_MMU3K
 		int odd = 0;
 		uint64_t cached_lo1 = 0;
+		/*
+		 *  For the Context register on TLB exception, BadVPN2 must
+		 *  always use the CPU's minimum page size (pagemask_shift),
+		 *  not the last-scanned TLB entry's page size.  Real hardware
+		 *  computes BadVPN2 from the faulting address alone.
+		 *
+		 *  This matters for VR41xx where the minimum page is 1 KB
+		 *  (pagemask_shift=11) but active entries use 4 KB pages
+		 *  (PageMask=0x1800).  The Linux VR41xx TLB refill handler
+		 *  does "srl Context, 3" expecting BadVPN2 = vaddr >> 11 << 4.
+		 *  If we use vaddr >> 13 (from a 4 KB TLB entry), the handler
+		 *  indexes the page table at the wrong offset.
+		 */
+		exception_vpn2 =
+		    (vaddr & vpn2_mask) >> pagemask_shift;
 #endif
 		int g_bit, v_bit, d_bit;
 		uint64_t cached_hi, cached_lo0;
@@ -438,12 +462,13 @@ exception:
 #ifdef V2P_MMU3K
 	vaddr_asid >>= R2K3K_ENTRYHI_ASID_SHIFT;
 	vaddr_vpn2 >>= 12;
-#endif
-
 	mips_cpu_exception(cpu, exccode, tlb_refill, vaddr,
 	    0, vaddr_vpn2, vaddr_asid, x_64);
+#else
+	mips_cpu_exception(cpu, exccode, tlb_refill, vaddr,
+	    0, exception_vpn2, vaddr_asid, x_64);
+#endif
 
 	/*  Return failure:  */
 	return 0;
 }
-

@@ -36,7 +36,6 @@
 struct cpu_family;
 struct diskimage;
 struct emul;
-struct fb_window;
 struct machine_arcbios;
 struct machine_pmax;
 struct memory;
@@ -98,7 +97,6 @@ struct x11_md {
 	int	n_fb_windows;
 	struct fb_window **fb_windows;
 };
-
 
 /*
  *  The machine struct:
@@ -181,7 +179,8 @@ struct machine {
 
 	/*  Per-instruction probe callback:  */
 	struct probe probe;
-
+	/*  Framebuffer backing buffer (from dev_fb_init)  */
+	struct vfb_data *fb;
 	/*  X11/framebuffer stuff (per machine):  */
 	struct x11_md x11_md;
 
