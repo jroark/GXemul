@@ -514,6 +514,7 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	struct memory *mem, int cpumodel);
 bool vr41xx_diag_get_state(struct machine *machine,
 	struct vr41xx_diag_state *out);
+void dev_vr41xx_stop_rtcl1(struct machine *machine);
 
 /*  lk201.c:  */
 struct lk201_data {

@@ -278,6 +278,39 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 		mask = status & cpu->cd.mips.coproc[0]->reg[COP0_CAUSE]
 		    & STATUS_IM_MASK;
 
+		/*
+		 * MIPS WAIT wake: Per the architecture spec, WAIT exits
+		 * on any interrupt, reset, or NMI — regardless of IE,
+		 * EXL, ERL, or individual IM mask bits.  The wake
+		 * condition is any Cause.IP bit set (raw interrupt
+		 * signal), not the IM-filtered mask used for delivery.
+		 *
+		 * When the interrupt IS deliverable (enabled && mask),
+		 * mips_cpu_exception() already unhalts and advances
+		 * past WAIT.  We only act here when delivery would
+		 * NOT occur — either because IE is clear, EXL/ERL
+		 * are set, or the pending IP has no matching IM bit.
+		 */
+		if (cpu->is_halted) {
+			uint64_t any_pending =
+			    cpu->cd.mips.coproc[0]->reg[COP0_CAUSE]
+			    & STATUS_IM_MASK;
+			if (any_pending && !(enabled && mask)) {
+				cpu->is_halted = false;
+				cpu->pc += sizeof(uint32_t);
+				cpu->wants_to_idle = false;
+#ifdef DYNTRANS_DUALMODE_32
+#ifdef MODE32
+				DYNTRANS_PC_TO_POINTERS32(cpu);
+#else
+				DYNTRANS_PC_TO_POINTERS(cpu);
+#endif
+#else
+				DYNTRANS_PC_TO_POINTERS(cpu);
+#endif
+			}
+		}
+
 		if (enabled && mask)
 			mips_cpu_exception(cpu, EXCEPTION_INT, 0, 0, 0, 0, 0,0);
 #endif

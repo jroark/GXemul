@@ -134,6 +134,53 @@ static void vr41xx_diag_register(struct machine *machine,
 	g_vr41xx_diag_bindings = binding;
 }
 
+/*
+ *  dev_vr41xx_stop_rtcl1():
+ *
+ *  Fully stop the RTCL1 periodic timer: remove the host-side timer,
+ *  drain any queued interrupt backlog, and deassert the interrupt line.
+ *  Used by the cold-boot path to prevent a pre-programmed RTCL1 from
+ *  bleeding timer interrupts into the kernel cold-start, which would
+ *  cause copy-loop functions to enter the OAL idle path prematurely.
+ *
+ *  The kernel will re-program RTCL1 via a write to offset 0x110 when
+ *  it is ready, which calls timer_add() since d->timer is now NULL.
+ */
+void dev_vr41xx_stop_rtcl1(struct machine *machine)
+{
+	struct vr41xx_diag_binding *binding;
+	struct vr41xx_data *d;
+
+	if (machine == NULL)
+		return;
+
+	for (binding = g_vr41xx_diag_bindings; binding != NULL;
+	    binding = binding->next) {
+		if (binding->machine == machine)
+			break;
+	}
+	if (binding == NULL || binding->data == NULL)
+		return;
+
+	d = binding->data;
+
+	if (d->timer != NULL) {
+		timer_remove(d->timer);
+		d->timer = NULL;
+	}
+	d->pending_timer_interrupts = 0;
+	d->rtc.rtcint &= (uint16_t)~RTCINT_RTCLONG1_INT;
+	if (d->rtcl1_irq_asserted) {
+		INTERRUPT_DEASSERT(d->rtcl1_irq);
+		d->rtcl1_irq_asserted = 0;
+	}
+
+	fprintf(stderr,
+	    "[VR41XX_TIMER] RTCL1 stopped for cold-boot"
+	    " (timer removed, backlog drained, IRQ deasserted)\n");
+}
+
+
 bool vr41xx_diag_get_state(struct machine *machine,
 	struct vr41xx_diag_state *out)
 {
