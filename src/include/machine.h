@@ -85,19 +85,6 @@ struct tick_functions {
 	void	**extra;
 };
 
-struct x11_md {
-	/*  X11/framebuffer stuff:  */
-	int	in_use;
-	int	scaledown;
-	int	scaleup;
-	int	n_display_names;
-	char	**display_names;
-	int	current_display_name_nr;	/*  updated by x11.c  */
-
-	int	n_fb_windows;
-	struct fb_window **fb_windows;
-};
-
 /*
  *  The machine struct:
  */
@@ -179,10 +166,9 @@ struct machine {
 
 	/*  Per-instruction probe callback:  */
 	struct probe probe;
+
 	/*  Framebuffer backing buffer (from dev_fb_init)  */
 	struct vfb_data *fb;
-	/*  X11/framebuffer stuff (per machine):  */
-	struct x11_md x11_md;
 
 	/*  Machine-dependent: (PROM stuff, etc.)  */
 	union {
@@ -392,8 +378,6 @@ void machine_add_breakpoint_string(struct machine *machine, char *str);
 void machine_add_tickfunction(struct machine *machine,
 	void (*func)(struct cpu *, void *), void *extra, int clockshift);
 void machine_statistics_init(struct machine *, char *fname);
-void machine_set_probe(struct machine *machine,
-	probe_func_t func, void *extra);
 void machine_register(char *name, MACHINE_SETUP_TYPE(setup));
 void machine_setup(struct machine *);
 void machine_add_devices_as_symbols(struct machine *machine, uint64_t offset);

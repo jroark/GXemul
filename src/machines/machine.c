@@ -381,28 +381,6 @@ void machine_statistics_init(struct machine *machine, char *fname)
 
 
 /*
- *  machine_set_probe():
- *
- *  Install or remove a per-instruction probe callback.
- *  Pass func=NULL to remove the probe.
- */
-void machine_set_probe(struct machine *machine,
-	probe_func_t func, void *extra)
-{
-	if (func != NULL) {
-		machine->probe.func = func;
-		machine->probe.extra = extra;
-		machine->probe.enabled = 1;
-		machine->allow_instruction_combinations = 0;
-	} else {
-		machine->probe.func = NULL;
-		machine->probe.extra = NULL;
-		machine->probe.enabled = 0;
-	}
-}
-
-
-/*
  *  machine_dumpinfo():
  *
  *  Dumps info about a machine in some kind of readable format. (Used by
@@ -664,44 +642,6 @@ bool machine_run(struct machine *machine)
 			any_running = true;
 			int was_mips16 = cpus[i]->cd.mips.mips16;
 			uint64_t pc_before = cpus[i]->pc;
-		    me->set_default_cpu != NULL) {
-			me->set_default_cpu(m);
-			break;
-		}
-		me = me->next;
-	}
-
-	if (m->cpu_name == NULL) {
-		fprintf(stderr, "machine_default_cputype(): no default"
-		    " cpu for machine type %i subtype %i\n",
-		    m->machine_type, m->machine_subtype);
-		exit(1);
-	}
-}
-
-
-/*****************************************************************************/
-
-
-/*
- *  machine_run():
- *
- *  Run one or more instructions on all CPUs in this machine. (Usually,
- *  around N_SAFE_DYNTRANS_LIMIT instructions will be run by the dyntrans
- *  system.)
- *
- *  Return value is true if any CPU in this machine is still running,
- *  false if all CPUs are stopped.
- */
-bool machine_run(struct machine *machine)
-{
-	struct cpu **cpus = machine->cpus;
-	int ncpus = machine->ncpus;
-	bool any_running = false;
-
-	for (int i=0; i<ncpus; i++) {
-		if (cpus[i]->running) {
-			any_running = true;
 			cpus[i]->run_instr(cpus[i]);
 			if (!cpus[i]->running) {
 				fprintf(stderr,
@@ -714,32 +654,6 @@ bool machine_run(struct machine *machine)
 				    was_mips16,
 				    cpus[i]->cd.mips.mips16);
 			}
-}
-
-
-/*****************************************************************************/
-
-
-/*
- *  machine_run():
- *
- *  Run one or more instructions on all CPUs in this machine. (Usually,
- *  around N_SAFE_DYNTRANS_LIMIT instructions will be run by the dyntrans
- *  system.)
- *
- *  Return value is true if any CPU in this machine is still running,
- *  false if all CPUs are stopped.
- */
-bool machine_run(struct machine *machine)
-{
-	struct cpu **cpus = machine->cpus;
-	int ncpus = machine->ncpus;
-	bool any_running = false;
-
-	for (int i=0; i<ncpus; i++) {
-		if (cpus[i]->running) {
-			any_running = true;
-			cpus[i]->run_instr(cpus[i]);
 		}
 	}
 

@@ -61,7 +61,7 @@
 	"special", "regimm", "j",    "jal",   "beq",      "bne",   "blez",  "bgtz", 		/*  0x00 - 0x07  */	\
 	"addi",    "addiu",  "slti", "sltiu", "andi",     "ori",   "xori",  "lui",		/*  0x08 - 0x0f  */	\
 	"cop0",    "cop1",   "cop2", "cop3",  "beql",     "bnel",  "blezl", "bgtzl",		/*  0x10 - 0x17  */	\
-	"daddi",   "daddiu", "ldl",  "ldr",   "special2", "jalx",  "lq" /*mdmx*/, "sq" /*special3*/, /*  0x18 - 0x1f  */\
+	"daddi",   "daddiu", "ldl",  "ldr",   "special2", "hi6_1d","lq" /*mdmx*/, "sq" /*special3*/, /*  0x18 - 0x1f  */\
 	"lb",      "lh",     "lwl",  "lw",    "lbu",      "lhu",   "lwr",   "lwu",		/*  0x20 - 0x27  */	\
 	"sb",      "sh",     "swl",  "sw",    "sdl",      "sdr",   "swr",   "cache",		/*  0x28 - 0x2f  */	\
 	"ll",      "lwc1",   "lwc2", "lwc3",  "lld",      "ldc1",  "ldc2",  "ld",		/*  0x30 - 0x37  */	\
@@ -311,7 +311,6 @@
 #define	HI6_LDL				0x1a	/*  011010  */	/*  MIPS III  */
 #define	HI6_LDR				0x1b	/*  011011  */	/*  MIPS III  */
 #define	HI6_SPECIAL2			0x1c	/*  011100  */
-#define	HI6_JALX			0x1d	/*  011101  */	/*  MIPS16 jump-and-link-exchange  */
 #define	    SPECIAL2_MADD		    0x00    /*  000000  */  /*  MIPS32 (?) TODO  */
 #define	    SPECIAL2_MADDU		    0x01    /*  000001  */  /*  MIPS32 (?) TODO  */
 #define	    SPECIAL2_MUL		    0x02    /*  000010  */  /*  MIPS32 (?) TODO  */
@@ -427,6 +426,7 @@
 #define	    MMI_PSRLW			    0x3e
 #define	    MMI_PSRAW			    0x3f
 #define	HI6_JALX			0x1d	/*  011101  */	/*  MIPS16 jump-and-link-exchange  */
+#define	HI6_LQ_MDMX			0x1e	/*  011110  */	/*  lq on R5900, MDMX on others?  */
 /*  TODO: MDMX opcodes  */
 #define	HI6_SQ_SPECIAL3			0x1f	/*  011111  */	/*  sq on R5900, SPECIAL3 on MIPS32/64 rev 2  */
 #define	    SPECIAL3_EXT		    0x00    /*  000000  */

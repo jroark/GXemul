@@ -84,7 +84,7 @@ static void warn_dyntrans_1kb_page(struct cpu *cpu, const char *phase,
  */
 static void initialize_cop0_config(struct cpu *cpu, struct mips_coproc *c)
 {
-	const int m16 = 1;	/*  MIPS16 support  */
+	const int m16 = 0;	/*  TODO: MIPS16 support  */
 	int IB, DB, SB, IC, DC, SC, IA, DA;
 
 	/*  Generic case for MIPS32/64:  */
@@ -649,6 +649,65 @@ void coproc_register_read(struct cpu *cpu,
 			}
 		}
 
+		unimpl = 0;
+	}
+	if (cp->coproc_nr==0 && reg_nr==COP0_ENTRYHI)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_COMPARE)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_STATUS)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_CAUSE)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_EPC)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_PRID)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_CONFIG) {
+		if (select > 0) {
+			switch (select) {
+			case 1:	*ptr = cpu->cd.mips.cop0_config_select1;
+				break;
+			default:fatal("coproc_register_read(): unimplemented"
+				    " config register select %i\n", select);
+				exit(1);
+			}
+			return;
+		}
+		unimpl = 0;
+	}
+	if (cp->coproc_nr==0 && reg_nr==COP0_LLADDR)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_WATCHLO)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_WATCHHI)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_XCONTEXT)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_ERRCTL)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_CACHEERR)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_TAGDATA_LO)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_TAGDATA_HI)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_ERROREPC)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_RESERV22) {
+		/*  Used by Linux on Linksys WRT54G  */
+		unimpl = 0;
+	}
+	if (cp->coproc_nr==0 && reg_nr==COP0_DEBUG)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_PERFCNT)	unimpl = 0;
+	if (cp->coproc_nr==0 && reg_nr==COP0_DESAVE)	unimpl = 0;
+
+	if (cp->coproc_nr==1)	unimpl = 0;
+
+	if (unimpl) {
+		fatal("cpu%i: warning: read from unimplemented coproc%i"
+		    " register %i (%s)\n", cpu->cpu_id, cp->coproc_nr, reg_nr,
+		    cp->coproc_nr==0? cop0_names[reg_nr] : "?");
+
+		mips_cpu_exception(cpu, EXCEPTION_CPU, 0, 0,
+		    cp->coproc_nr, 0, 0, 0);
+		return;
+	}
+
+	*ptr = cp->reg[reg_nr];
+}
+
+
+/*
+ *  coproc_register_write();
+ *
+ *  Write a value to a MIPS coprocessor register.
+ */
 void coproc_register_write(struct cpu *cpu,
 	struct mips_coproc *cp, int reg_nr, uint64_t *ptr, int flag64,
 	int select)
