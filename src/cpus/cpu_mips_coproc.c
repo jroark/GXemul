@@ -1921,26 +1921,47 @@ void coproc_tlbwri(struct cpu *cpu, int randomflag)
 		 * VR4131 pfn_shift=10: PA 0x3000 → EntryLo0=0x31F.
 		 * Match: index==1, VPN2 matches 0xFFFFC000, lo0.V==0.
 		 */
-		if (cpu->cd.mips.cpu_type.rev == MIPS_R4100 && index == 1) {
-			static int tlb1_log_count = 0;
-			if (tlb1_log_count < 5) {
-				tlb1_log_count++;
-				fprintf(stderr,
-				    "[TLB1_WRITE] hi=%016" PRIx64
-				    " lo0=%016" PRIx64
-				    " lo1=%016" PRIx64
-				    " mask=%016" PRIx64
-				    " PC=0x%08" PRIx64 "\n",
-				    cp->tlbs[index].hi,
-				    cp->tlbs[index].lo0,
-				    cp->tlbs[index].lo1,
-				    cp->tlbs[index].mask,
-				    (uint64_t)cpu->pc);
-			}
-			if (!(cp->tlbs[index].lo0 & ENTRYLO_V)
-			    && ((uint32_t)cp->tlbs[index].hi & 0xFFFFE000u)
-			        == 0xFFFFC000u) {
+		/*
+		 * BE-300 cold boot: the OAL vtable init writes TLB
+		 * entries for the kernel stack with the even page
+		 * invalid.  OEMInit callbacks need deep stack.
+		 * Override any TLB write for VPN2 0xFFFFC000 or
+		 * 0xFFFFB000 (two adjacent pairs covering
+		 * 0xFFFFB000-0xFFFFDFFF) that has the even page
+		 * invalid, making it valid with appropriate PAs.
+		 */
+		if (cpu->cd.mips.cpu_type.rev == MIPS_R4100
+		    && !(cp->tlbs[index].lo0 & ENTRYLO_V)) {
+			uint32_t hi32 = (uint32_t)cp->tlbs[index].hi;
+			/* VPN2=0xFFFFC000: even=0xFFFFC000 odd=0xFFFFD000
+			 * PA 0x3000 → PFN=0xC, EntryLo=(0xC<<6)|0x1F=0x31F */
+			if ((hi32 & 0xFFFFE000u) == 0xFFFFC000u) {
 				cp->tlbs[index].lo0 = 0x31F;
+			}
+			/* VPN2=0xFFFFB000: even=0xFFFFB000 odd=0xFFFFC000?
+			 * No: VR4131 4KB pages → VPN2=0xFFFFA000 covers
+			 * 0xFFFFA000(even)/0xFFFFB000(odd).
+			 * VPN2=0xFFFFE000 mask yields 0xFFFFA000 for the
+			 * pair covering 0xFFFFB000.  But the actual pairing
+			 * with PageMask=0x1800 is: VA>>11 gives VPN2.
+			 * For 0xFFFFB000: (0xFFFFB000 >> 11) = 0x1FFFFF6,
+			 * VPN2 = (0x1FFFFF6 >> 1) << 11 = 0xFFFFB000?
+			 * On VR4131, pagemask_shift=11, so:
+			 *   even_va = VPN2 & ~((1<<11)-1) with even bit clear
+			 *   odd = (va >> 10) & 1
+			 * For PageMask=0x1800, switch case gives pageshift=12.
+			 * So 4KB pairs: even=xxxx_x000, odd=xxxx_x000+0x1000.
+			 * VPN2 for 0xFFFFB000: (0xFFFFB000 >> 13) << 13 = 0xFFFF_A000
+			 * Even=0xFFFFA000, Odd=0xFFFFB000
+			 * So VPN2=0xFFFFA000 covers 0xFFFFA/B000.
+			 *
+			 * To cover 0xFFFFBxxx: need VPN2=0xFFFFA000.
+			 * PA for even (0xFFFFA000): PA 0x2000 → PFN=8
+			 *   EntryLo=(8<<6)|0x1F=0x21F
+			 * PA for odd (0xFFFFB000): use same physical range
+			 */
+			if ((hi32 & 0xFFFFE000u) == 0xFFFFA000u) {
+				cp->tlbs[index].lo0 = 0x21F;
 			}
 		}
 
