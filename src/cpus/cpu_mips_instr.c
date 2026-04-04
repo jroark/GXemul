@@ -2349,7 +2349,15 @@ X(eret)
 	cpu->cd.mips.mips16 = (cpu->pc & 1) ? 1 : 0;
 	cpu->pc &= ~(uint64_t)1;
 
-	quick_pc_to_pointers(cpu);
+	if (cpu->cd.mips.mips16) {
+		/*  Drain the IC loop — the page may have stale MIPS32
+		 *  translations.  The MIPS16 slow interpreter will take
+		 *  over on the next dyntrans entry.  */
+		cpu->cd.mips.next_ic = &nothing_call;
+		cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+	} else {
+		quick_pc_to_pointers(cpu);
+	}
 
 	cpu->cd.mips.rmw = 0;   /*  the "LL bit"  */
 }

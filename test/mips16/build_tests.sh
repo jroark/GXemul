@@ -16,7 +16,7 @@ docker run --rm -v "$PROJDIR:/work" mips-cross-dev bash -c '
 set -e
 cd /work/test/mips16
 
-for src in test_mips16.S test_mips16_alu.S test_mips16_mem.S test_mips16_branch.S; do
+for src in test_mips16.S test_mips16_alu.S test_mips16_mem.S test_mips16_branch.S test_mips16_muldiv.S test_mips16_xmode.S test_mips16_extend.S test_mips16_except.S; do
     bin="${src%.S}"
     echo "  $src -> $bin"
     mipsel-linux-gnu-gcc -EB -mips32r2 -nostdlib \

@@ -212,11 +212,11 @@ int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
 				break;
 			case M16_I8_MOV32R:
 				{
-					int rz5 = iw & 0x1f;
-					int r32 = ((rz5 & 0x7) << 2) | (rz5 >> 3);
+					int r32 = (iw >> 3) & 0x1f;
+					int src = iw & 0x7;
 					debug("mov32r\t$%s, $%s\n",
 					    regnames[r32],
-					    regnames[mips16_reg_map[ry]]);
+					    regnames[mips16_reg_map[src]]);
 				}
 				break;
 			case M16_I8_MOVR32:
@@ -705,13 +705,14 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			int offset = iw & 0x7ff;
 			if (extended) {
 				offset = ((extend_word & 0x1f) << 11) |
-				    (iw & 0x7ff);
+				    (((extend_word >> 5) & 0x3f) << 5) |
+				    (iw & 0x1f);
 				offset = SIGN_EXTEND(offset, 16);
 			} else {
 				offset = SIGN_EXTEND(offset, 11);
 			}
 			offset <<= 1;
-			cpu->pc = cpu->pc + 2 + offset;
+			cpu->pc = cpu->pc + (extended ? 4 : 2) + offset;
 			return 1;
 		}
 
@@ -791,14 +792,16 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			int offset = iw & 0xff;
 			if (extended) {
 				offset = ((extend_word & 0x1f) << 11) |
-				    (iw & 0x7ff);
+				    (((extend_word >> 5) & 0x3f) << 5) |
+				    (iw & 0x1f);
 				offset = SIGN_EXTEND(offset, 16);
 			} else {
 				offset = SIGN_EXTEND(offset, 8);
 			}
 			offset <<= 1;
 			if (M16REG(rx) == 0) {
-				cpu->pc = cpu->pc + 2 + offset;
+				cpu->pc = cpu->pc +
+				    (extended ? 4 : 2) + offset;
 				return 1;
 			}
 		}
@@ -809,14 +812,16 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			int offset = iw & 0xff;
 			if (extended) {
 				offset = ((extend_word & 0x1f) << 11) |
-				    (iw & 0x7ff);
+				    (((extend_word >> 5) & 0x3f) << 5) |
+				    (iw & 0x1f);
 				offset = SIGN_EXTEND(offset, 16);
 			} else {
 				offset = SIGN_EXTEND(offset, 8);
 			}
 			offset <<= 1;
 			if (M16REG(rx) != 0) {
-				cpu->pc = cpu->pc + 2 + offset;
+				cpu->pc = cpu->pc +
+				    (extended ? 4 : 2) + offset;
 				return 1;
 			}
 		}
@@ -927,7 +932,9 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					int offset;
 					if (extended) {
 						offset = ((extend_word & 0x1f)
-						    << 11) | (iw & 0x7ff);
+						    << 11) |
+						    (((extend_word >> 5) & 0x3f)
+						    << 5) | (iw & 0x1f);
 						offset = SIGN_EXTEND(offset, 16);
 					} else {
 						offset = SIGN_EXTEND(imm8, 8);
@@ -935,7 +942,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					offset <<= 1;
 					if (cpu->cd.mips.gpr[MIPS_GPR_T8]
 					    == 0) {
-						cpu->pc = cpu->pc + 2 +
+						cpu->pc = cpu->pc +
+						    (extended ? 4 : 2) +
 						    offset;
 						return 1;
 					}
@@ -946,7 +954,9 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					int offset;
 					if (extended) {
 						offset = ((extend_word & 0x1f)
-						    << 11) | (iw & 0x7ff);
+						    << 11) |
+						    (((extend_word >> 5) & 0x3f)
+						    << 5) | (iw & 0x1f);
 						offset = SIGN_EXTEND(offset, 16);
 					} else {
 						offset = SIGN_EXTEND(imm8, 8);
@@ -954,7 +964,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					offset <<= 1;
 					if (cpu->cd.mips.gpr[MIPS_GPR_T8]
 					    != 0) {
-						cpu->pc = cpu->pc + 2 +
+						cpu->pc = cpu->pc +
+						    (extended ? 4 : 2) +
 						    offset;
 						return 1;
 					}
@@ -1006,14 +1017,14 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					/*
 					 *  MOV32R: move MIPS16 reg to
 					 *  MIPS32 reg.
-					 *  r32 = bits [7:5,2:0] = rz | ry
-					 *  Actually: r32 = bits 4:0
-					 *  combined from different fields.
+					 *  Encoding: r32[4:0] in bits [7:3],
+					 *  source ry[2:0] in bits [2:0].
 					 */
-					int rz5 = iw & 0x1f;
-					int r32 = ((rz5 & 0x7) << 2) | (rz5 >> 3);
+					int r32 = (iw >> 3) & 0x1f;
+					int src = iw & 0x7;
 					cpu->cd.mips.gpr[r32] =
-					    M16REG(ry);
+					    cpu->cd.mips.gpr[
+					    mips16_reg_map[src]];
 				}
 				break;
 			case M16_I8_MOVR32:

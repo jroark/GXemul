@@ -50,6 +50,10 @@ run_test "mode-switch"  "$TESTDIR/test_mips16"        "M32:M16:OK"
 run_test "alu"          "$TESTDIR/test_mips16_alu"     "ABCDEFGHIJKLMNOPQRST"
 run_test "memory"       "$TESTDIR/test_mips16_mem"     "ABCDEFGH"
 run_test "branch-jump"  "$TESTDIR/test_mips16_branch"  "ABCDEFG"
+run_test "muldiv"       "$TESTDIR/test_mips16_muldiv"  "ABCDEF"
+run_test "cross-mode"   "$TESTDIR/test_mips16_xmode"   "ABCDEFGH"
+run_test "extend"       "$TESTDIR/test_mips16_extend"  "ABCDEFGH"
+run_test "exception"    "$TESTDIR/test_mips16_except"  "ABCD"
 
 rm -f "$TMPFILE"
 
