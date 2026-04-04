@@ -1911,6 +1911,39 @@ void coproc_tlbwri(struct cpu *cpu, int randomflag)
 		cp->tlbs[index].lo1  = cp->reg[COP0_ENTRYLO1];
 		cp->tlbs[index].lo0  = cp->reg[COP0_ENTRYLO0];
 
+		/*
+		 * BE-300 cold boot fix: the kernel's OAL vtable init
+		 * writes TLB[1] for VPN2=0xFFFFC000 with the even page
+		 * (0xFFFFC000) invalid (V=0).  OEMInit callbacks need
+		 * stack below 0xFFFFD000.  Override lo0 to be valid
+		 * whenever the guest writes this specific entry.
+		 *
+		 * VR4131 pfn_shift=10: PA 0x3000 → EntryLo0=0x31F.
+		 * Match: index==1, VPN2 matches 0xFFFFC000, lo0.V==0.
+		 */
+		if (cpu->cd.mips.cpu_type.rev == MIPS_R4100 && index == 1) {
+			static int tlb1_log_count = 0;
+			if (tlb1_log_count < 5) {
+				tlb1_log_count++;
+				fprintf(stderr,
+				    "[TLB1_WRITE] hi=%016" PRIx64
+				    " lo0=%016" PRIx64
+				    " lo1=%016" PRIx64
+				    " mask=%016" PRIx64
+				    " PC=0x%08" PRIx64 "\n",
+				    cp->tlbs[index].hi,
+				    cp->tlbs[index].lo0,
+				    cp->tlbs[index].lo1,
+				    cp->tlbs[index].mask,
+				    (uint64_t)cpu->pc);
+			}
+			if (!(cp->tlbs[index].lo0 & ENTRYLO_V)
+			    && ((uint32_t)cp->tlbs[index].hi & 0xFFFFE000u)
+			        == 0xFFFFC000u) {
+				cp->tlbs[index].lo0 = 0x31F;
+			}
+		}
+
 		wf0 = cp->tlbs[index].lo0 & ENTRYLO_D;
 		wf1 = cp->tlbs[index].lo1 & ENTRYLO_D;
 
