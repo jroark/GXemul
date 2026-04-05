@@ -99,6 +99,7 @@ struct vr41xx_data {
 	rtc_state_t	rtc;
 	cmu_state_t	cmu;
 	pmu_state_t	pmu;
+	uint8_t		bcu_regs[0x20];
 	uint8_t		dmaau_regs[0x20];
 	uint8_t		dcu_regs[0x20];
 	uint8_t		sdramu_regs[0x10];
@@ -1145,6 +1146,11 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	 * The 0x0f000400 SDRAMU window surveys as zero, so leave it zeroed
 	 * but make it stateful so WinCE can observe its own writes.
 	 */
+	/*  BCU registers: start zeroed (hardware reset defaults).
+	 *  ROM init at 0x5CC-0x618 programs BCUCNTREG1, ROMSIZE, etc.
+	 *  Seed only REVIDREG (read-only on real hardware). */
+	vr41xx_latch_write(d->bcu_regs, 0x10, 2, 0x0104);  /* VR4131 rev */
+
 	vr41xx_seed_latch32(d->dmaau_regs, 0x00, 0x01fff800);
 	vr41xx_seed_latch32(d->dmaau_regs, 0x04, 0x01fff800);
 	vr41xx_seed_latch32(d->dmaau_regs, 0x08, 0x01fff800);

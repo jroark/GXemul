@@ -342,13 +342,12 @@ int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
 				break;
 			case M16_I8_MOV32R:
 				{
-					int rz5 = iw & 0x1f;
-					int r32 = (rz5 & ~3) |
-					    ((rz5 & 1) << 1) |
-					    ((rz5 >> 1) & 1);
+					int m16_rz = iw & 0x7;
+					int r32 = ((iw >> 3) & 0x3) << 3 |
+					    ((iw >> 5) & 0x7);
 					debug("mov32r\t$%s, $%s\n",
 					    regnames[r32],
-					    regnames[mips16_reg_map[ry]]);
+					    regnames[mips16_reg_map[m16_rz]]);
 				}
 				break;
 			case M16_I8_MOVR32:
@@ -1013,6 +1012,25 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		}
 	}
 
+	/* Diagnostic: track $s7 (GPR 23) at key points */
+	{
+		static int s7_diag = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if ((rpc == 0x1100u || rpc == 0x1102u ||
+		     rpc == 0x1168u || rpc == 0x116Au) &&
+		    s7_diag < 20) {
+			s7_diag++;
+			fprintf(stderr,
+			    "[S7_TRACK] PC=0x%08X $s7(GPR23)=0x%08X"
+			    " $s8(GPR30)=0x%08X $a0=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[23],
+			    (uint32_t)cpu->cd.mips.gpr[30],
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    s7_diag);
+		}
+	}
+
 	/* Full register dump for critical range 0x110C-0x1116 */
 	{
 		static int regdump_count = 0;
@@ -1038,6 +1056,41 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_RA],
 			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
 			    regdump_count);
+		}
+	}
+
+	/* Diagnostic: track FUN_9fc013f0 status check and exit path.
+	 * 0x1416 = loop top (reads NAND status), 0x14C4 = exit check,
+	 * 0x14C6 = FUN_9fc003dc call (should never return). */
+	{
+		static int f13f0_diag = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x1416u && f13f0_diag < 5) {
+			f13f0_diag++;
+			fprintf(stderr,
+			    "[F13F0] LOOP_TOP PC=0x%08X s0=0x%08X"
+			    " s1=0x%08X s3=0x%08X s4=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[16],
+			    (uint32_t)cpu->cd.mips.gpr[17],
+			    (uint32_t)cpu->cd.mips.gpr[19],
+			    (uint32_t)cpu->cd.mips.gpr[20],
+			    f13f0_diag);
+		}
+		if (rpc == 0x14C4u && f13f0_diag < 20) {
+			f13f0_diag++;
+			fprintf(stderr,
+			    "[F13F0] EXIT_CHK PC=0x%08X s1=0x%08X"
+			    " (s1!=0 → return, s1==0 → FUN_3dc) #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[17],
+			    f13f0_diag);
+		}
+		if (rpc == 0x14C6u) {
+			fprintf(stderr,
+			    "[F13F0] CALLING_3DC! PC=0x%08X s1=0x%08X\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[17]);
 		}
 	}
 
@@ -1495,16 +1548,18 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					/*
 					 *  MOV32R: move MIPS16 reg to
 					 *  any MIPS32 register.
-					 *  [7:5] = MIPS16 source reg (ry)
-					 *  [4:0] = MIPS32 dest reg, encoded
-					 *  with bits [1:0] swapped vs normal.
+					 *  Per MIPS16e spec:
+					 *  [7:5] = R32[2:0] (low 3 bits of
+					 *          MIPS32 dest register)
+					 *  [4:3] = R32[4:3] (high 2 bits)
+					 *  [2:0] = rz (MIPS16 source reg)
+					 *  R32 = {bits[4:3], bits[7:5]}
 					 */
-					int rz5 = iw & 0x1f;
-					int r32 = (rz5 & ~3) |
-					    ((rz5 & 1) << 1) |
-					    ((rz5 >> 1) & 1);
+					int m16_rz = iw & 0x7;
+					int r32 = ((iw >> 3) & 0x3) << 3 |
+					    ((iw >> 5) & 0x7);
 					cpu->cd.mips.gpr[r32] =
-					    M16REG(ry);
+					    M16REG(m16_rz);
 				}
 				break;
 			case M16_I8_MOVR32:
