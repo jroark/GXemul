@@ -716,6 +716,29 @@ DEVICE_ACCESS(vr41xx)
 
 	/*  TODO: Maybe these should be handled separately as well?  */
 	if (d->cpumodel == 4131) {
+		if (relative_addr < 0x20) {
+			/*
+			 *  The ROM programs BCUCNT/ROMSIZE/IO timing via the
+			 *  0x000-0x01f window and later polls offset 0x000 as
+			 *  a completion flag. Keep that subwindow stateful so
+			 *  the ROM can observe its own writes, but preserve the
+			 *  strap-backed identity/clock bytes at 0x10-0x15.
+			 */
+			if (writeflag == MEM_READ) {
+				odata = vr41xx_latch_read(d->bcu_regs,
+				    (uint32_t)relative_addr, (unsigned)len);
+			} else {
+				uint8_t readonly_shadow[6];
+
+				memcpy(readonly_shadow, d->bcu_regs + 0x10,
+				    sizeof(readonly_shadow));
+				vr41xx_latch_write(d->bcu_regs,
+				    (uint32_t)relative_addr, (unsigned)len, idata);
+				memcpy(d->bcu_regs + 0x10, readonly_shadow,
+				    sizeof(readonly_shadow));
+			}
+			goto log_access;
+		}
 		if (relative_addr >= 0x20 && relative_addr < 0x40) {
 			uint32_t off = (uint32_t)(relative_addr - 0x20);
 			if (writeflag == MEM_READ)
@@ -1146,10 +1169,18 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	 * The 0x0f000400 SDRAMU window surveys as zero, so leave it zeroed
 	 * but make it stateful so WinCE can observe its own writes.
 	 */
-	/*  BCU registers: start zeroed (hardware reset defaults).
-	 *  ROM init at 0x5CC-0x618 programs BCUCNTREG1, ROMSIZE, etc.
-	 *  Seed only REVIDREG (read-only on real hardware). */
-	vr41xx_latch_write(d->bcu_regs, 0x10, 2, 0x0104);  /* VR4131 rev */
+	/*
+	 *  Keep the VR4131 BCU control window stateful so the ROM can read
+	 *  back the values it programs at 0x5cc-0x618. The strap-backed
+	 *  identity/clock halfwords at 0x10-0x15 are stable in every
+	 *  hardware survey, so seed those read-only bytes directly:
+	 *    0x10 = 0x5002
+	 *    0x14 = 0x020c
+	 *  The ROM later writes 0x16 itself, producing the observed
+	 *  0x0883020c word at 0x14 in post-init captures.
+	 */
+	vr41xx_seed_latch32(d->bcu_regs, 0x10, 0x00005002);
+	vr41xx_latch_write(d->bcu_regs, 0x14, 2, 0x020c);
 
 	vr41xx_seed_latch32(d->dmaau_regs, 0x00, 0x01fff800);
 	vr41xx_seed_latch32(d->dmaau_regs, 0x04, 0x01fff800);
