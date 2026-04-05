@@ -212,7 +212,10 @@ int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
 				break;
 			case M16_I8_MOV32R:
 				{
-					int r32 = iw & 0x1f;
+					int rz5 = iw & 0x1f;
+					int r32 = (rz5 & ~3) |
+					    ((rz5 & 1) << 1) |
+					    ((rz5 >> 1) & 1);
 					debug("mov32r\t$%s, $%s\n",
 					    regnames[r32],
 					    regnames[mips16_reg_map[ry]]);
@@ -563,32 +566,6 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 	int ok = 1;
 	int extended = 0;
 	uint16_t extend_word = 0;
-
-	/* Debug: detect SP corruption — track last good PC */
-	{
-		static uint32_t last_good_sp = 0;
-		static uint32_t last_good_pc = 0;
-		static int sp_trace = 0;
-		uint32_t sp = (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP];
-		uint32_t pc32 = (uint32_t)cpu->pc;
-		if (sp >= 0x80000000u || sp == 0) {
-			last_good_sp = sp;
-			last_good_pc = pc32;
-		} else if (sp_trace < 5) {
-			fprintf(stderr, "[M16_SP_BUG] SP corrupted! SP=0x%08X PC=0x%08X"
-				" last_good: SP=0x%08X PC=0x%08X"
-				" a0=%08X RA=%08X s0=%08X s1=%08X v0=%08X v1=%08X\n",
-				sp, pc32,
-				last_good_sp, last_good_pc,
-				(uint32_t)cpu->cd.mips.gpr[4],
-				(uint32_t)cpu->cd.mips.gpr[31],
-				(uint32_t)cpu->cd.mips.gpr[16],
-				(uint32_t)cpu->cd.mips.gpr[17],
-				(uint32_t)cpu->cd.mips.gpr[2],
-				(uint32_t)cpu->cd.mips.gpr[3]);
-			sp_trace++;
-		}
-	}
 
 	/*
 	 *  JAL/JALX delay slot completion: if we just executed the
@@ -1056,10 +1033,13 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					 *  MOV32R: move MIPS16 reg to
 					 *  any MIPS32 register.
 					 *  [7:5] = MIPS16 source reg (ry)
-					 *  [4:0] = MIPS32 dest reg (direct
-					 *  encoding, same as MOVR32).
+					 *  [4:0] = MIPS32 dest reg, encoded
+					 *  with bits [1:0] swapped vs normal.
 					 */
-					int r32 = iw & 0x1f;
+					int rz5 = iw & 0x1f;
+					int r32 = (rz5 & ~3) |
+					    ((rz5 & 1) << 1) |
+					    ((rz5 >> 1) & 1);
 					cpu->cd.mips.gpr[r32] =
 					    M16REG(ry);
 				}
