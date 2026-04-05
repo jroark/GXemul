@@ -55,7 +55,7 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 /*
  *  ROM MIPS16 call/return tracing (diagnostic, rate-limited).
  */
-#define ROM_CALL_LOG_MAX  200
+#define ROM_CALL_LOG_MAX  500
 static int rom_call_log_count = 0;
 
 static void rom_m16_log_call(struct cpu *cpu, const char *type,
@@ -636,6 +636,21 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		    "MIPS16 mode?\n");
 		cpu->running = 0;
 		return 0;
+	}
+
+	/* Diagnostic: watchpoint on $s3 changes (rate-limited) */
+	{
+		static uint32_t last_s3 = 0;
+		static int s3_watch_count = 0;
+		uint32_t cur_s3 = (uint32_t)cpu->cd.mips.gpr[19];
+		if (cur_s3 != last_s3 && s3_watch_count < 10) {
+			s3_watch_count++;
+			fprintf(stderr,
+			    "[S3_WATCH] PC=0x%08X $s3: 0x%08X -> 0x%08X #%d\n",
+			    (uint32_t)cpu->pc, last_s3, cur_s3,
+			    s3_watch_count);
+			last_s3 = cur_s3;
+		}
 	}
 
 	/*  Fetch the instruction  */
