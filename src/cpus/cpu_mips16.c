@@ -778,6 +778,21 @@ static int m16_store_byte(struct cpu *cpu, uint64_t addr, uint8_t val)
 			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
 			    sw_watch_count);
 		}
+		/* Trace DMA command block writes (PA 0x0A00C170-C177) */
+		if (pa >= 0x0A00C170u && pa <= 0x0A00C177u) {
+			static int dma_sb_count = 0;
+			if (dma_sb_count < 50) {
+				dma_sb_count++;
+				fprintf(stderr,
+				    "[DMA_SB] PC=0x%08X"
+				    " SB [0x%08X]=0x%02X"
+				    " (cmd[%u]) #%d\n",
+				    (uint32_t)cpu->pc,
+				    a32, val,
+				    pa - 0x0A00C170u,
+				    dma_sb_count);
+			}
+		}
 	}
 	return m16_memory_rw(cpu, addr, &val, 1, 1);
 }
@@ -1165,23 +1180,40 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		}
 	}
 
-	/* Dump NAND buffer and TLB at function 0x10EC entry */
+	/* Dump NAND device struct at FUN_9fc010ec entry */
 	{
-		static int bufdump_done = 0;
+		static int bufdump_count = 0;
 		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
-		if (rpc == 0x10ECu && !bufdump_done) {
-			bufdump_done = 1;
+		if (rpc == 0x10ECu && bufdump_count < 5) {
+			bufdump_count++;
 			uint32_t buf_va = 0x80010060u;
-			fprintf(stderr, "[BUF_DUMP] PC=0x%08X"
-			    " dumping MEM[0x%08X]:\n",
-			    (uint32_t)cpu->pc, buf_va);
-			for (int j = 0; j < 80; j += 4) {
+			/* Key fields: [0]=DMA base, [0x2C]=page cursor,
+			 * [0x30]=remaining pages, [0x34]=remaining bytes */
+			uint32_t f00 = m16_load_word(cpu,
+			    (uint64_t)(buf_va + 0x00), &ok);
+			uint32_t f2c = m16_load_word(cpu,
+			    (uint64_t)(buf_va + 0x2c), &ok);
+			uint32_t f30 = m16_load_word(cpu,
+			    (uint64_t)(buf_va + 0x30), &ok);
+			uint32_t f34 = m16_load_word(cpu,
+			    (uint64_t)(buf_va + 0x34), &ok);
+			fprintf(stderr,
+			    "[DEV_STRUCT] PC=0x%08X #%d"
+			    " base=0x%08X page_cur=0x%08X"
+			    " rem_pages=%u rem_bytes=%u"
+			    " a0=0x%08X a1=0x%08X\n",
+			    (uint32_t)cpu->pc, bufdump_count,
+			    f00, f2c, f30, f34,
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->cd.mips.gpr[5]);
+			if (bufdump_count == 1) {
+			    fprintf(stderr, "[DEV_STRUCT] Full dump:\n");
+			    for (int j = 0; j < 80; j += 4) {
 				uint32_t w = m16_load_word(cpu,
 				    (uint64_t)(buf_va + j), &ok);
-				fprintf(stderr, "[BUF_DUMP]   [+%02X]"
-				    " = 0x%08X%s\n", j, w,
-				    j == 0x40 ?
-				    "  <-- 0x800100A0" : "");
+				fprintf(stderr, "  [+%02X] = 0x%08X\n",
+				    j, w);
+			    }
 			}
 			/* Dump all TLB entries */
 			int ntlb = cpu->cd.mips.cpu_type
