@@ -213,8 +213,8 @@ int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
 			case M16_I8_MOV32R:
 				{
 					int rz5 = iw & 0x1f;
-					int r32 = ((rz5 & 0x7) << 2) |
-					    (rz5 >> 3);
+					int r32 = ((rz5 & 0x3) << 3) |
+					    (rz5 >> 2);
 					debug("mov32r\t$%s, $%s\n",
 					    regnames[r32],
 					    regnames[mips16_reg_map[ry]]);
@@ -222,7 +222,9 @@ int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
 				break;
 			case M16_I8_MOVR32:
 				{
-					int r32 = iw & 0x1f;
+					int rz5 = iw & 0x1f;
+					int r32 = ((rz5 & 0x3) << 3) |
+					    (rz5 >> 2);
 					debug("movr32\t$%s, $%s\n",
 					    regnames[mips16_reg_map[ry]],
 					    regnames[r32]);
@@ -1032,12 +1034,13 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					 *  MOV32R: move MIPS16 reg to
 					 *  any MIPS32 register.
 					 *  [7:5] = MIPS16 source reg (ry)
-					 *  [4:0] = MIPS32 dest reg, bits
-					 *          REARRANGED: {[2:0],[4:3]}
+					 *  [4:0] = MIPS32 dest reg, encoded
+					 *  as {r32[2:0], r32[4:3]}.
+					 *  Decode: r32 = (rz5[1:0]<<3) | rz5[4:2]
 					 */
 					int rz5 = iw & 0x1f;
-					int r32 = ((rz5 & 0x7) << 2) |
-					    (rz5 >> 3);
+					int r32 = ((rz5 & 0x3) << 3) |
+					    (rz5 >> 2);
 					cpu->cd.mips.gpr[r32] =
 					    M16REG(ry);
 				}
@@ -1045,8 +1048,14 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			case M16_I8_MOVR32:
 				{
 					/*  MOVR32: move MIPS32 reg to
-					 *  MIPS16 reg.  */
-					int r32 = iw & 0x1f;
+					 *  MIPS16 reg.
+					 *  [4:0] = MIPS32 source reg, encoded
+					 *  as {r32[2:0], r32[4:3]}.
+					 *  Decode: r32 = (rz5[1:0]<<3) | rz5[4:2]
+					 */
+					int rz5 = iw & 0x1f;
+					int r32 = ((rz5 & 0x3) << 3) |
+					    (rz5 >> 2);
 					M16REG(ry) = cpu->cd.mips.gpr[r32];
 				}
 				break;
