@@ -1679,9 +1679,43 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    (uint32_t)M16REG(ry));
 				break;
 			case M16_RRR_SUBU:
-				M16REG(rz) = (int32_t)(
-				    (uint32_t)M16REG(rx) -
-				    (uint32_t)M16REG(ry));
+				{
+					static int subu_diag = 0;
+					uint32_t rpc =
+					    (uint32_t)cpu->pc & 0x3FFF;
+					uint32_t s1v =
+					    (uint32_t)M16REG(rx);
+					uint32_t s2v =
+					    (uint32_t)M16REG(ry);
+					uint32_t res = s1v - s2v;
+					if (rpc >= 0x1170u &&
+					    rpc <= 0x1180u &&
+					    subu_diag < 5) {
+						subu_diag++;
+						fprintf(stderr,
+						    "[RRR_SUBU]"
+						    " PC=0x%08X"
+						    " rx=%d(r%d)"
+						    "=0x%08X"
+						    " ry=%d(r%d)"
+						    "=0x%08X"
+						    " rz=%d(r%d)"
+						    " res=0x%08X"
+						    " #%d\n",
+						    (uint32_t)cpu->pc,
+						    rx,
+						    mips16_reg_map[rx],
+						    s1v,
+						    ry,
+						    mips16_reg_map[ry],
+						    s2v,
+						    rz,
+						    mips16_reg_map[rz],
+						    res,
+						    subu_diag);
+					}
+					M16REG(rz) = (int32_t)res;
+				}
 				break;
 			default:
 				fatal("UNIMPLEMENTED MIPS16 RRR func %i "
