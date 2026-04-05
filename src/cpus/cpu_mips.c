@@ -1731,6 +1731,30 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	uint64_t *reg = &cpu->cd.mips.coproc[0]->reg[0];
 	int exc_model = cpu->cd.mips.cpu_type.exc_model;
 
+	/* Debug: log TLB exceptions at entry BEFORE any state changes */
+	{
+		static int exc_entry_diag = 0;
+		if ((exccode == EXCEPTION_TLBL ||
+		    exccode == EXCEPTION_TLBS) && exc_entry_diag < 10) {
+			exc_entry_diag++;
+			fprintf(stderr,
+			    "[EXC_ENTRY] exc=%d a0=0x%08X"
+			    " pc=0x%08X vaddr=0x%08X"
+			    " EXL=%d m16=%d refill=%d"
+			    " EPC=0x%08X #%d\n",
+			    exccode,
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->pc,
+			    (uint32_t)vaddr,
+			    (int)((reg[COP0_STATUS] &
+			    STATUS_EXL) ? 1 : 0),
+			    cpu->cd.mips.mips16,
+			    tlb,
+			    (uint32_t)reg[COP0_EPC],
+			    exc_entry_diag);
+		}
+	}
+
 	if (cpu->is_halted) {
 		/*
 		 *  If the exception occurred on a 'wait' instruction, then let
@@ -2004,6 +2028,30 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	/*  Sign-extend:  */
 	reg[COP0_CAUSE] = (int64_t)(int32_t)reg[COP0_CAUSE];
 	reg[COP0_STATUS] = (int64_t)(int32_t)reg[COP0_STATUS];
+
+	/* Debug: log ALL TLB exceptions with a0 and EXL.
+	 * Note: this fires BEFORE the function modifies EXL/EPC/pc.
+	 * So EXL shown is the ORIGINAL value before this exception. */
+	{
+		static int exc_a0_diag = 0;
+		if ((exccode == EXCEPTION_TLBL ||
+		    exccode == EXCEPTION_TLBS) && exc_a0_diag < 20) {
+			exc_a0_diag++;
+			fprintf(stderr,
+			    "[EXC_TLB] exc=%d a0=0x%08X pc=0x%08X"
+			    " vaddr=0x%08X EXL_orig=%d m16=%d"
+			    " EPC_orig=0x%08X #%d\n",
+			    exccode,
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->pc,
+			    (uint32_t)vaddr,
+			    (int)((reg[COP0_STATUS] &
+			    STATUS_EXL) ? 1 : 0),
+			    cpu->cd.mips.mips16,
+			    (uint32_t)reg[COP0_EPC],
+			    exc_a0_diag);
+		}
+	}
 
 	if (cpu->is_32bit) {
 		reg[COP0_EPC] = (int64_t)(int32_t)reg[COP0_EPC];

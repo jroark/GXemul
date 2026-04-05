@@ -812,6 +812,24 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 	/* Diagnostic: trace SP changes from previous instruction */
 	rom_m16_sp_trace(cpu);
 
+	/* Diagnostic: watch $a0 changes in the callback processing range */
+	{
+		static uint32_t a0_watch_last = 0xDEADDEAD;
+		static int a0_watch_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		uint32_t cur_a0 = (uint32_t)cpu->cd.mips.gpr[4];
+		if (rpc >= 0x1160u && rpc <= 0x11C0u &&
+		    cur_a0 != a0_watch_last && a0_watch_count < 20) {
+			a0_watch_count++;
+			fprintf(stderr,
+			    "[A0_WATCH] PC=0x%08X $a0: 0x%08X -> 0x%08X"
+			    " delay=%d #%d\n",
+			    (uint32_t)cpu->pc, a0_watch_last, cur_a0,
+			    cpu->delay_slot, a0_watch_count);
+			a0_watch_last = cur_a0;
+		}
+	}
+
 	/* Check for DMA autocopy at ROM DMA polling function entry */
 	wince_boot_check_dma_autocopy(cpu);
 
@@ -1543,7 +1561,53 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
+			/* Debug: track LBU at 0x117E */
+			{
+				static int lbu_diag = 0;
+				uint32_t rpc =
+				    (uint32_t)cpu->pc & 0x3FFF;
+				if (rpc == 0x117Eu && lbu_diag < 5) {
+					uint32_t a0_pre =
+					    (uint32_t)cpu->cd.mips
+					    .gpr[4];
+					fprintf(stderr,
+					    "[LBU_117E] BEFORE"
+					    " a0=0x%08X a3=0x%08X"
+					    " addr=0x%08X"
+					    " EXL=%d #%d\n",
+					    a0_pre,
+					    (uint32_t)M16REG(rx),
+					    (uint32_t)a,
+					    (int)((cpu->cd.mips
+					    .coproc[0]->reg
+					    [COP0_STATUS] &
+					    STATUS_EXL) ? 1 : 0),
+					    lbu_diag + 1);
+				}
+			}
 			val = m16_load_byte(cpu, a, &ok);
+			/* Debug: after load at 0x117E */
+			{
+				static int lbu_diag2 = 0;
+				uint32_t rpc =
+				    (uint32_t)cpu->pc & 0x3FFF;
+				if (rpc == 0x117Eu && lbu_diag2 < 5) {
+					lbu_diag2++;
+					fprintf(stderr,
+					    "[LBU_117E] AFTER"
+					    " a0=0x%08X ok=%d"
+					    " val=0x%02X"
+					    " EXL=%d #%d\n",
+					    (uint32_t)cpu->cd.mips
+					    .gpr[4],
+					    ok, val & 0xFF,
+					    (int)((cpu->cd.mips
+					    .coproc[0]->reg
+					    [COP0_STATUS] &
+					    STATUS_EXL) ? 1 : 0),
+					    lbu_diag2);
+				}
+			}
 			M16_CHECK_MEM_OK(ok);
 			M16REG(ry) = val;
 		}

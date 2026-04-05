@@ -2364,11 +2364,56 @@ X(eret)
 		cpu->cd.mips.coproc[0]->reg[COP0_STATUS] &= ~STATUS_EXL;
 	}
 
+	/* Debug: track a0 through ERET to MIPS16 */
+	{
+		static int eret_diag = 0;
+		if ((cpu->pc & 1) && eret_diag < 3) {
+			eret_diag++;
+			fprintf(stderr,
+			    "[ERET_M16] PC=0x%08X"
+			    " a0=0x%08X EPC=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->cd.mips.coproc[0]
+			    ->reg[COP0_EPC],
+			    eret_diag);
+			/* Dump TLB handler at BFC00200 */
+			if (eret_diag == 1) {
+				for (int j = 0; j < 11; j++) {
+					uint8_t buf[4];
+					uint64_t haddr =
+					    0xffffffffbfc00200ULL +
+					    j * 4;
+					cpu->memory_rw(cpu, cpu->mem,
+					    haddr, buf, 4,
+					    MEM_READ, CACHE_DATA);
+					uint32_t w = buf[0] |
+					    (buf[1] << 8) |
+					    (buf[2] << 16) |
+					    (buf[3] << 24);
+					fprintf(stderr,
+					    "[TLB_DUMP] 0x%04X:"
+					    " 0x%08X\n",
+					    0x200 + j * 4, w);
+				}
+			}
+		}
+	}
+
 	/*  Restore MIPS16 mode from EPC/ErrorEPC bit 0  */
 	cpu->cd.mips.mips16 = (cpu->pc & 1) ? 1 : 0;
 	cpu->pc &= ~(uint64_t)1;
 
-	quick_pc_to_pointers(cpu);
+	if (cpu->cd.mips.mips16) {
+		/*  Returning to MIPS16 mode: do NOT use quick_pc_to_pointers()
+		 *  because the IC page contains stale MIPS32 translations.
+		 *  Use nothing_call to drain the unrolled IC loop; the MIPS16
+		 *  check at the top of DYNTRANS_RUN_INSTR_DEF will catch it. */
+		cpu->cd.mips.next_ic = &nothing_call;
+		cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+	} else {
+		quick_pc_to_pointers(cpu);
+	}
 
 	cpu->cd.mips.rmw = 0;   /*  the "LL bit"  */
 }
