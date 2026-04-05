@@ -46,6 +46,7 @@
 #include "misc.h"
 #include "opcodes_mips16.h"
 #include "symbol.h"
+#include "wince_boot.h"
 
 
 static const int mips16_reg_map[8] = MIPS16_REG_MAP;
@@ -696,6 +697,22 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		int mode = cpu->cd.mips.m16_delay_jalx;
 		cpu->delay_slot = NOT_DELAYED;
 		cpu->cd.mips.m16_delay_jalx = 0;
+
+		/* Debug: track $a0 changes through delay slot */
+		{
+			static int ds_a0_count = 0;
+			uint32_t t32 = (uint32_t)(target & ~(uint64_t)1);
+			if ((t32 & 0x3FFF) == 0x13F0 && ds_a0_count < 5) {
+				ds_a0_count++;
+				fprintf(stderr,
+				    "[DS_COMPLETE] target=0x%08X"
+				    " a0=0x%08X mode=%d #%d\n",
+				    t32,
+				    (uint32_t)cpu->cd.mips.gpr[4],
+				    mode, ds_a0_count);
+			}
+		}
+
 		switch (mode) {
 		case 0:
 			/*  JAL: stay in MIPS16 mode, target is
@@ -727,6 +744,20 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		return 0;
 	}
 
+	/* Debug: detect when PC enters 0x13F0 */
+	{
+		static int pc13f0_count = 0;
+		if (((uint32_t)cpu->pc & 0x3FFF) == 0x13F0 && pc13f0_count < 10) {
+			pc13f0_count++;
+			fprintf(stderr,
+			    "[PC_13F0] PC=0x%08X a0=0x%08X SP=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
+			    pc13f0_count);
+		}
+	}
+
 	/* Diagnostic: watchpoint on $s3 changes (rate-limited) */
 	{
 		static uint32_t last_s3 = 0;
@@ -744,6 +775,9 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 
 	/* Diagnostic: trace SP changes from previous instruction */
 	rom_m16_sp_trace(cpu);
+
+	/* Check for DMA autocopy at ROM DMA polling function entry */
+	wince_boot_check_dma_autocopy(cpu);
 
 	/*  Fetch the instruction  */
 	iw = m16_fetch(cpu, addr, &ok);
