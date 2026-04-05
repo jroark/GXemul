@@ -123,6 +123,41 @@ X(invalid)
 	exit(1);
 }
 
+#ifndef MIPS_LOG_LOWRAM_CONTROL_TARGET_DEFINED
+#define MIPS_LOG_LOWRAM_CONTROL_TARGET_DEFINED
+static void mips_log_lowram_control_target(struct cpu *cpu,
+    const char *kind, MODE_int_t target)
+{
+	static int lowram_ctl_count = 0;
+	uint32_t t32 = (uint32_t) target;
+
+	if (t32 < 0x80000000u || t32 >= 0x80020000u || lowram_ctl_count >= 20)
+		return;
+
+	lowram_ctl_count++;
+	fprintf(stderr,
+	    "[LOWRAM_CTL] kind=%s pc=0x%08X target=0x%08X"
+	    " sp=0x%08X ra=0x%08X fp=0x%08X"
+	    " a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X"
+	    " s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X #%d\n",
+	    kind,
+	    (uint32_t) cpu->pc,
+	    t32,
+	    (uint32_t) cpu->cd.mips.gpr[MIPS_GPR_SP],
+	    (uint32_t) cpu->cd.mips.gpr[MIPS_GPR_RA],
+	    (uint32_t) cpu->cd.mips.gpr[MIPS_GPR_FP],
+	    (uint32_t) cpu->cd.mips.gpr[4],
+	    (uint32_t) cpu->cd.mips.gpr[5],
+	    (uint32_t) cpu->cd.mips.gpr[6],
+	    (uint32_t) cpu->cd.mips.gpr[7],
+	    (uint32_t) cpu->cd.mips.gpr[16],
+	    (uint32_t) cpu->cd.mips.gpr[17],
+	    (uint32_t) cpu->cd.mips.gpr[18],
+	    (uint32_t) cpu->cd.mips.gpr[19],
+	    lowram_ctl_count);
+}
+#endif
+
 
 /*
  *  reserved:  Attempt to execute a reserved instruction (e.g. a 64-bit
@@ -991,6 +1026,7 @@ X(jr)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
+		mips_log_lowram_control_target(cpu, "jr", rs);
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
@@ -1013,6 +1049,7 @@ X(jr_ra)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
+		mips_log_lowram_control_target(cpu, "jr_ra", rs);
 		if (rs & 1) {
 			/* Debug: track s0 on MIPS32→MIPS16 return */
 			{
@@ -1053,6 +1090,7 @@ X(jr_ra_addiu)
 	MODE_int_t rs = cpu->cd.mips.gpr[MIPS_GPR_RA];
 	reg(ic[1].arg[1]) = (int32_t)
 	    ((int32_t)reg(ic[1].arg[0]) + (int32_t)ic[1].arg[2]);
+	mips_log_lowram_control_target(cpu, "jr_ra_addiu", rs);
 	if (rs & 1) {
 		cpu->cd.mips.mips16 = 1;
 		cpu->pc = rs & ~(MODE_int_t)1;
@@ -1100,6 +1138,7 @@ X(jalr)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
+		mips_log_lowram_control_target(cpu, "jalr", rs);
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
@@ -1126,6 +1165,7 @@ X(jalr_trace)
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
+		mips_log_lowram_control_target(cpu, "jalr_trace", rs);
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
@@ -5188,4 +5228,3 @@ X(to_be_translated)
 #include "cpu_dyntrans.c" 
 #undef	DYNTRANS_TO_BE_TRANSLATED_TAIL
 }
-

@@ -636,6 +636,7 @@ bool machine_run(struct machine *machine)
 	struct cpu **cpus = machine->cpus;
 	int ncpus = machine->ncpus;
 	bool any_running = false;
+	static int lowram_pc_transition_count = 0;
 
 	for (int i=0; i<ncpus; i++) {
 		if (cpus[i]->running) {
@@ -643,6 +644,34 @@ bool machine_run(struct machine *machine)
 			int was_mips16 = cpus[i]->cd.mips.mips16;
 			uint64_t pc_before = cpus[i]->pc;
 			cpus[i]->run_instr(cpus[i]);
+			{
+				uint32_t before32 = (uint32_t)pc_before;
+				uint32_t after32 = (uint32_t)cpus[i]->pc;
+				if ((before32 < 0x80000000u || before32 >= 0x80020000u) &&
+				    after32 >= 0x80000000u && after32 < 0x80020000u &&
+				    lowram_pc_transition_count < 16) {
+					lowram_pc_transition_count++;
+					fprintf(stderr,
+					    "[LOWRAM_PC] cpu%d before=0x%08" PRIx64
+					    " after=0x%08" PRIx64
+					    " was_m16=%d now_m16=%d"
+					    " sp=0x%08X ra=0x%08X fp=0x%08X"
+					    " a0=0x%08X a1=0x%08X s0=0x%08X s1=0x%08X #%d\n",
+					    i,
+					    pc_before,
+					    (uint64_t)cpus[i]->pc,
+					    was_mips16,
+					    cpus[i]->cd.mips.mips16,
+					    (uint32_t)cpus[i]->cd.mips.gpr[MIPS_GPR_SP],
+					    (uint32_t)cpus[i]->cd.mips.gpr[MIPS_GPR_RA],
+					    (uint32_t)cpus[i]->cd.mips.gpr[MIPS_GPR_FP],
+					    (uint32_t)cpus[i]->cd.mips.gpr[4],
+					    (uint32_t)cpus[i]->cd.mips.gpr[5],
+					    (uint32_t)cpus[i]->cd.mips.gpr[16],
+					    (uint32_t)cpus[i]->cd.mips.gpr[17],
+					    lowram_pc_transition_count);
+				}
+			}
 			if (!cpus[i]->running) {
 				fprintf(stderr,
 				    "[MACHINE_RUN] cpu%d stopped after"
@@ -898,4 +927,3 @@ void machine_init(void)
 
 	automachine_init();
 }
-

@@ -59,6 +59,11 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 #define ROM_CALL_LOG_MAX  500
 static int rom_call_log_count = 0;
 
+#define M16_LOWRAM_CTL_MAX  32
+static int m16_lowram_ctl_count = 0;
+static uint32_t m16_pending_ctl_pc = 0;
+static const char *m16_pending_ctl_kind = NULL;
+
 /*
  *  SP change tracing — logs every SP modification during ROM MIPS16 execution.
  */
@@ -132,6 +137,52 @@ static void rom_m16_log_call(struct cpu *cpu, const char *type,
 			(void)ok2;
 		}
 	}
+}
+
+static void rom_m16_record_control(struct cpu *cpu, const char *kind,
+    uint32_t branch_pc)
+{
+	uint32_t pc32 = (uint32_t)cpu->pc;
+
+	if (pc32 < 0x9FC00000u || pc32 > 0x9FC03FFFu) {
+		m16_pending_ctl_pc = 0;
+		m16_pending_ctl_kind = NULL;
+		return;
+	}
+
+	m16_pending_ctl_pc = branch_pc;
+	m16_pending_ctl_kind = kind;
+}
+
+static void rom_m16_log_lowram_control(struct cpu *cpu, uint64_t target,
+    int mode)
+{
+	uint32_t target32 = (uint32_t)(target & ~(uint64_t)1);
+
+	if (target32 < 0x80000000u || target32 >= 0x80020000u ||
+	    m16_lowram_ctl_count >= M16_LOWRAM_CTL_MAX)
+		return;
+
+	m16_lowram_ctl_count++;
+	fprintf(stderr,
+	    "[M16_LOWRAM_CTL] kind=%s branch_pc=0x%08X complete_pc=0x%08X"
+	    " raw_target=0x%08X target=0x%08X mode=%d"
+	    " sp=0x%08X ra=0x%08X fp=0x%08X"
+	    " a0=0x%08X a1=0x%08X s0=0x%08X s1=0x%08X #%d\n",
+	    m16_pending_ctl_kind != NULL ? m16_pending_ctl_kind : "?",
+	    m16_pending_ctl_pc,
+	    (uint32_t)cpu->pc,
+	    (uint32_t)target,
+	    target32,
+	    mode,
+	    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
+	    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_RA],
+	    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_FP],
+	    (uint32_t)cpu->cd.mips.gpr[4],
+	    (uint32_t)cpu->cd.mips.gpr[5],
+	    (uint32_t)cpu->cd.mips.gpr[16],
+	    (uint32_t)cpu->cd.mips.gpr[17],
+	    m16_lowram_ctl_count);
 }
 
 /*
@@ -776,6 +827,9 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		int mode = cpu->cd.mips.m16_delay_jalx;
 		cpu->delay_slot = NOT_DELAYED;
 		cpu->cd.mips.m16_delay_jalx = 0;
+		rom_m16_log_lowram_control(cpu, target, mode);
+		m16_pending_ctl_pc = 0;
+		m16_pending_ctl_kind = NULL;
 
 		/* Debug: track $a0 changes through delay slot */
 		{
@@ -1161,6 +1215,33 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		}
 	}
 
+	/* Dump the 7-byte signature candidate that 0x0D7C compares. */
+	{
+		static int sigdump_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x0DAAu && sigdump_count < 8) {
+			uint64_t buf_va = cpu->cd.mips.gpr[7];
+			uint64_t exp_va = cpu->cd.mips.gpr[3];
+			int ok_local = 0;
+			sigdump_count++;
+			fprintf(stderr,
+			    "[SIG_DUMP] PC=0x%08X buf=0x%08X exp=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)buf_va,
+			    (uint32_t)exp_va,
+			    sigdump_count);
+			for (int j = 0; j < 8; j++) {
+				uint8_t got = (uint8_t)m16_load_byte(cpu, buf_va + j,
+				    &ok_local);
+				uint8_t exp = (uint8_t)m16_load_byte(cpu, exp_va + j,
+				    &ok_local);
+				fprintf(stderr,
+				    "[SIG_DUMP]   [+%d] got=0x%02X exp=0x%02X\n",
+				    j, got, exp);
+			}
+		}
+	}
+
 	switch (op) {
 
 	case M16_OP_ADDIUSP:
@@ -1227,6 +1308,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			uint16_t hi_word, lo_word;
 			uint32_t target;
 			int jalx;
+			uint32_t branch_pc = (uint32_t)cpu->pc;
 
 			if (extended) {
 				/*  We consumed EXTEND then got JAL as next -
@@ -1277,6 +1359,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			    ((cpu->pc + 2) &
 			    ~(uint64_t)0x0fffffff) | target;
 			cpu->cd.mips.m16_delay_jalx = jalx;
+			rom_m16_record_control(cpu,
+			    jalx ? "JALX" : "JAL", branch_pc);
 
 			/*  Advance PC to delay slot (PC + 4).  The next
 			 *  interpreter call executes the delay slot, then
@@ -1950,6 +2034,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		case M16_RR_JR:
 			{
 				uint64_t target;
+				uint32_t branch_pc = (uint32_t)cpu->pc;
 				/*
 				 *  MIPS16 JR/JALR share func=0.
 				 *  The ry field [7:5] distinguishes them:
@@ -1973,6 +2058,15 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				/*  Both JR and JALR have a delay slot.  */
 				cpu->cd.mips.m16_delay_target = target;
 				cpu->cd.mips.m16_delay_jalx = 2;  /* use bit 0 */
+				if (is_jalr)
+					rom_m16_record_control(cpu, "JALR",
+					    branch_pc);
+				else if (rx == 0)
+					rom_m16_record_control(cpu, "RET",
+					    branch_pc);
+				else
+					rom_m16_record_control(cpu, "JR",
+					    branch_pc);
 				cpu->pc += 2;  /*  advance to delay slot  */
 				cpu->delay_slot = TO_BE_DELAYED;
 				if (!is_jalr && rx == 0 &&
@@ -1996,6 +2090,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		case M16_RR_JALR:
 			{
 				uint64_t target = M16REG(rx);
+				uint32_t branch_pc = (uint32_t)cpu->pc;
 				/*  Link: RA = PC + 4, with MIPS16 bit
 				 *  (PC+2 for JR insn + 2 for delay slot)  */
 				cpu->cd.mips.gpr[MIPS_GPR_RA] =
@@ -2003,6 +2098,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				/*  JALR has a one-instruction delay slot.  */
 				cpu->cd.mips.m16_delay_target = target;
 				cpu->cd.mips.m16_delay_jalx = 2;  /* JR/JALR: use bit 0 */
+				rom_m16_record_control(cpu, "JALR", branch_pc);
 				cpu->pc += 2;  /*  advance to delay slot  */
 				cpu->delay_slot = TO_BE_DELAYED;
 				if (cpu->machine->show_trace_tree)
