@@ -136,14 +136,53 @@ static void rom_m16_log_call(struct cpu *cpu, const char *type,
 
 /*
  *  When a MIPS16 memory access fails, check if it was a TLB exception
- *  (EXL now set in Status).  If so, return 1 — the exception was taken
- *  and the exception handler will run.  Only kill the CPU for true
- *  fatal failures (bus error, etc.).
+ *  (EXL now set in Status).  If so, handle it directly by installing
+ *  an identity-map TLB entry, clearing EXL, and retrying.  This avoids
+ *  returning to the dyntrans loop for the general exception handler,
+ *  which has issues with IC cache invalidation during TLB writes
+ *  (GXemul flushes the IC cache on R4100 1KB TLB writes, preventing
+ *  the handler's ERET from executing).
+ *
+ *  For non-TLB failures, kill the CPU.
  */
+static void m16_tlb_fixup(struct cpu *cpu, uint64_t vaddr)
+{
+	/*  Create an identity-map 4KB TLB entry for the faulting page.  */
+	struct mips_coproc *cp = cpu->cd.mips.coproc[0];
+	uint64_t vpn2 = vaddr & ~(uint64_t)0x1FFF;  /* 4KB page aligned */
+	uint64_t pfn0 = (vpn2 >> 12) << 6;
+	uint64_t pfn1 = ((vpn2 + 0x1000) >> 12) << 6;
+
+	cp->reg[COP0_ENTRYHI]  = vpn2 | (cp->reg[COP0_ENTRYHI] & 0xFF);
+	cp->reg[COP0_ENTRYLO0] = pfn0 | 0x3F;  /* V D G C=3 */
+	cp->reg[COP0_ENTRYLO1] = pfn1 | 0x3F;
+	cp->reg[COP0_PAGEMASK] = 0x1800;  /* 4KB pages for R4100 */
+
+	/*  Write to a random non-wired TLB entry.  */
+	coproc_tlbwri(cpu, 1);  /* randomflag=1 → tlbwr */
+
+	/*  Clear EXL to undo the exception state.  */
+	cp->reg[COP0_STATUS] &= ~STATUS_EXL;
+}
+
+/*  Check result of a MIPS16 memory access.  If it was a TLB miss,
+ *  install an identity-map 4KB entry and set m16_retry so the caller
+ *  can re-execute the instruction.  For non-TLB exceptions, defer
+ *  to the dyntrans exception handler.  For hard failures, stop.    */
 #define	M16_CHECK_MEM_OK(ok)	do {					\
 	if (!(ok)) {							\
-		if (cpu->cd.mips.coproc[0]->reg[COP0_STATUS] & STATUS_EXL) \
-			return 1;  /* exception taken, handler will run */  \
+		if (cpu->cd.mips.coproc[0]->reg[COP0_STATUS] & STATUS_EXL) { \
+			uint32_t cause_exc = (cpu->cd.mips.coproc[0]	\
+			    ->reg[COP0_CAUSE] >> 2) & 0x1F;		\
+			if (cause_exc == EXCEPTION_TLBL ||		\
+			    cause_exc == EXCEPTION_TLBS) {		\
+				uint64_t bva = cpu->cd.mips.coproc[0]	\
+				    ->reg[COP0_BADVADDR];		\
+				m16_tlb_fixup(cpu, bva);		\
+				return 1;  /* retry on next call */	\
+			}						\
+			return 1;  /* non-TLB exception: defer */	\
+		}							\
 		fprintf(stderr, "[MIPS16] fatal mem fail pc=0x%" PRIx64	\
 		    " status=0x%08x\n", cpu->pc,			\
 		    (uint32_t)cpu->cd.mips.coproc[0]->reg[COP0_STATUS]);\
@@ -995,7 +1034,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		}
 	}
 
-	/* Dump NAND buffer at function 0x10EC entry */
+	/* Dump NAND buffer and TLB at function 0x10EC entry */
 	{
 		static int bufdump_done = 0;
 		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
@@ -1010,6 +1049,35 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    (uint64_t)(buf_va + j), &ok);
 				fprintf(stderr, "[BUF_DUMP]   [+%02X]"
 				    " = 0x%08X\n", j, w);
+			}
+			/* Dump all TLB entries */
+			int ntlb = cpu->cd.mips.cpu_type
+			    .nr_of_tlb_entries;
+			fprintf(stderr, "[TLB_DUMP] %d entries"
+			    " (Wired=%d):\n", ntlb,
+			    (int)cpu->cd.mips.coproc[0]
+			    ->reg[COP0_WIRED]);
+			for (int t = 0; t < ntlb; t++) {
+				uint64_t hi = cpu->cd.mips
+				    .coproc[0]->tlbs[t].hi;
+				uint64_t lo0 = cpu->cd.mips
+				    .coproc[0]->tlbs[t].lo0;
+				uint64_t lo1 = cpu->cd.mips
+				    .coproc[0]->tlbs[t].lo1;
+				uint64_t mask = cpu->cd.mips
+				    .coproc[0]->tlbs[t].mask;
+				if (lo0 || lo1 || hi)
+					fprintf(stderr,
+					    "[TLB_DUMP]   [%2d]"
+					    " hi=0x%08X"
+					    " lo0=0x%08X"
+					    " lo1=0x%08X"
+					    " mask=0x%08X\n",
+					    t,
+					    (uint32_t)hi,
+					    (uint32_t)lo0,
+					    (uint32_t)lo1,
+					    (uint32_t)mask);
 			}
 		}
 	}

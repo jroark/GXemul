@@ -834,6 +834,11 @@ void DYNTRANS_PC_TO_POINTERS_GENERIC(struct cpu *cpu)
 	if (cpu->translation_cache_cur_ofs >= dyntrans_cache_size) {
 		debugmsg(SUBSYS_CPU, "dyntrans", VERBOSITY_INFO,
 		    "resetting the translation cache");
+		fprintf(stderr,
+		    "[IC_RESET] PC=0x%08X ofs=%u/%u\n",
+		    (uint32_t)cpu->pc,
+		    (uint32_t)cpu->translation_cache_cur_ofs,
+		    (uint32_t)dyntrans_cache_size);
 
 		cpu_create_or_reset_tc(cpu);
 	}

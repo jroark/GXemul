@@ -2367,6 +2367,22 @@ X(eret)
 	/* Debug: track a0 through ERET to MIPS16 */
 	{
 		static int eret_diag = 0;
+		static int eret_all = 0;
+		if (eret_all < 5) {
+			eret_all++;
+			fprintf(stderr,
+			    "[ERET_ALL] EPC=0x%08X Status=0x%08X"
+			    " ERL=%d a0=0x%08X #%d\n",
+			    (uint32_t)cpu->cd.mips.coproc[0]
+			    ->reg[COP0_EPC],
+			    (uint32_t)cpu->cd.mips.coproc[0]
+			    ->reg[COP0_STATUS],
+			    (int)((cpu->cd.mips.coproc[0]
+			    ->reg[COP0_STATUS] &
+			    STATUS_ERL) ? 1 : 0),
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    eret_all);
+		}
 		if ((cpu->pc & 1) && eret_diag < 3) {
 			eret_diag++;
 			fprintf(stderr,
