@@ -911,7 +911,9 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			fprintf(stderr,
 			    "[M16_ITRACE] PC=0x%08X iw=0x%04X op=%d"
 			    " ext=%d extw=0x%04X SP=0x%08X"
-			    " v0=0x%08X v1=0x%08X a2=0x%08X"
+			    " v0=0x%08X v1=0x%08X"
+			    " a0=0x%08X a1=0x%08X"
+			    " a2=0x%08X a3=0x%08X"
 			    " s0=0x%08X s1=0x%08X"
 			    " t8=0x%08X #%d\n",
 			    (uint32_t)cpu->pc, iw, op,
@@ -919,7 +921,10 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
 			    (uint32_t)cpu->cd.mips.gpr[2],
 			    (uint32_t)cpu->cd.mips.gpr[3],
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->cd.mips.gpr[5],
 			    (uint32_t)cpu->cd.mips.gpr[6],
+			    (uint32_t)cpu->cd.mips.gpr[7],
 			    (uint32_t)cpu->cd.mips.gpr[16],
 			    (uint32_t)cpu->cd.mips.gpr[17],
 			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_T8],
