@@ -1820,6 +1820,28 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				}
 			}
 			val = m16_load_byte(cpu, a, &ok);
+			/* Diagnostic: B000FF compare trace at
+			 * FUN_9fc00d7c (0xDAA=NAND byte, 0xDAC=ref byte) */
+			{
+				uint32_t rpc =
+				    (uint32_t)cpu->pc & 0x3FFF;
+				static int cmp_diag = 0;
+				if ((rpc == 0x0DAAu || rpc == 0x0DACu)
+				    && cmp_diag < 40) {
+					cmp_diag++;
+					fprintf(stderr,
+					    "[B000FF_CMP] PC=0x%08X"
+					    " addr=0x%08X"
+					    " byte=0x%02X"
+					    " %s #%d\n",
+					    (uint32_t)cpu->pc,
+					    (uint32_t)a,
+					    val & 0xFF,
+					    rpc == 0x0DAAu ?
+					    "NAND" : "REF",
+					    cmp_diag);
+				}
+			}
 			/* Debug: after load at 0x117E */
 			{
 				static int lbu_diag2 = 0;

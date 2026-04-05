@@ -524,6 +524,22 @@ not just the device in question.
 	if (writeflag == MEM_WRITE) {
 		memcpy(memblock + offset, data, len);
 		wince_boot_note_low_vector_write(cpu, paddr, len);
+		/*
+		 * Diagnostic: trace writes to the ROM's working-RAM area
+		 * around 0x80010010 (PA 0x10000-0x10020) to discover what
+		 * code populates the B000FF signature reference buffer.
+		 */
+		if (paddr >= 0x10000 && paddr < 0x10020) {
+			uint64_t val = 0;
+			for (size_t i = 0; i < len && i < 8; i++)
+				val |= (uint64_t)data[i] << (8 * i);
+			fprintf(stderr,
+			    "[RAM_WATCH] W PA=0x%08llX len=%zu val=0x%llX"
+			    " PC=0x%08X\n",
+			    (unsigned long long)paddr, len,
+			    (unsigned long long)val,
+			    (uint32_t)cpu->pc);
+		}
 	} else
 		memcpy(data, memblock + offset, len);
 
