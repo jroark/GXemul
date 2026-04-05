@@ -687,6 +687,23 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 	int extended = 0;
 	uint16_t extend_word = 0;
 
+	/* Debug: track s0 at MIPS16 interpreter entry for 0x10F4 */
+	{
+		static int entry_s0_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x10F4u && entry_s0_count < 3) {
+			entry_s0_count++;
+			fprintf(stderr,
+			    "[M16_ENTRY] PC=0x%08X s0=0x%08X"
+			    " a0=0x%08X delay=%d #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[16],
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    cpu->delay_slot,
+			    entry_s0_count);
+		}
+	}
+
 	/*
 	 *  JAL/JALX delay slot completion: if we just executed the
 	 *  delay slot instruction (delay_slot == DELAYED), redirect
@@ -710,6 +727,25 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    t32,
 				    (uint32_t)cpu->cd.mips.gpr[4],
 				    mode, ds_a0_count);
+			}
+		}
+
+		/* Debug: track s0 around JALX to prologue 0xA98 */
+		{
+			static int jalx_s0_count = 0;
+			uint32_t t32 = (uint32_t)(target & ~(uint64_t)1);
+			if (mode == 1 && (t32 & 0x3FFF) == 0x0A98 &&
+			    jalx_s0_count < 10) {
+				jalx_s0_count++;
+				fprintf(stderr,
+				    "[JALX_OUT] target=0x%08X"
+				    " s0=0x%08X a0=0x%08X"
+				    " PC_was=0x%08X #%d\n",
+				    t32,
+				    (uint32_t)cpu->cd.mips.gpr[16],
+				    (uint32_t)cpu->cd.mips.gpr[4],
+				    (uint32_t)cpu->pc,
+				    jalx_s0_count);
 			}
 		}
 
@@ -778,6 +814,20 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 
 	/* Check for DMA autocopy at ROM DMA polling function entry */
 	wince_boot_check_dma_autocopy(cpu);
+
+	/* Debug: s0 checkpoint before fetch for 0x10F4 */
+	{
+		static int s0chk = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x10F4u && s0chk < 3) {
+			s0chk++;
+			fprintf(stderr,
+			    "[S0_PRE_FETCH] PC=0x%08X s0=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[16],
+			    s0chk);
+		}
+	}
 
 	/*  Fetch the instruction  */
 	iw = m16_fetch(cpu, addr, &ok);
@@ -862,7 +912,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			    "[M16_ITRACE] PC=0x%08X iw=0x%04X op=%d"
 			    " ext=%d extw=0x%04X SP=0x%08X"
 			    " v0=0x%08X v1=0x%08X a2=0x%08X"
-			    " s0=0x%08X s1=0x%08X #%d\n",
+			    " s0=0x%08X s1=0x%08X"
+			    " t8=0x%08X #%d\n",
 			    (uint32_t)cpu->pc, iw, op,
 			    extended, extend_word,
 			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
@@ -871,7 +922,72 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			    (uint32_t)cpu->cd.mips.gpr[6],
 			    (uint32_t)cpu->cd.mips.gpr[16],
 			    (uint32_t)cpu->cd.mips.gpr[17],
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_T8],
 			    rom_itrace_count);
+		}
+	}
+
+	/* Full register dump for critical range 0x110C-0x1116 */
+	{
+		static int regdump_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc >= 0x110Cu && rpc <= 0x1116u &&
+		    regdump_count < 20) {
+			regdump_count++;
+			fprintf(stderr,
+			    "[M16_REGDUMP] PC=0x%08X"
+			    " s0=0x%08X s1=0x%08X v0=0x%08X v1=0x%08X"
+			    " a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X"
+			    " t8=0x%08X ra=0x%08X SP=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[16],
+			    (uint32_t)cpu->cd.mips.gpr[17],
+			    (uint32_t)cpu->cd.mips.gpr[2],
+			    (uint32_t)cpu->cd.mips.gpr[3],
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->cd.mips.gpr[5],
+			    (uint32_t)cpu->cd.mips.gpr[6],
+			    (uint32_t)cpu->cd.mips.gpr[7],
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_T8],
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_RA],
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
+			    regdump_count);
+		}
+	}
+
+	/* FIFO loop diagnostic: log s1 (store target) at 0x13A4 */
+	{
+		static int fifo_loop_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x13A4u && fifo_loop_count < 5) {
+			fifo_loop_count++;
+			fprintf(stderr,
+			    "[FIFO_LOOP] PC=0x%08X s1=0x%08X"
+			    " v0=0x%08X v1=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[17],
+			    (uint32_t)cpu->cd.mips.gpr[2],
+			    (uint32_t)cpu->cd.mips.gpr[3],
+			    fifo_loop_count);
+		}
+	}
+
+	/* Dump NAND buffer at function 0x10EC entry */
+	{
+		static int bufdump_done = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x10ECu && !bufdump_done) {
+			bufdump_done = 1;
+			uint32_t buf_va = 0x80010060u;
+			fprintf(stderr, "[BUF_DUMP] PC=0x%08X"
+			    " dumping MEM[0x%08X]:\n",
+			    (uint32_t)cpu->pc, buf_va);
+			for (int j = 0; j < 64; j += 4) {
+				uint32_t w = m16_load_word(cpu,
+				    (uint64_t)(buf_va + j), &ok);
+				fprintf(stderr, "[BUF_DUMP]   [+%02X]"
+				    " = 0x%08X\n", j, w);
+			}
 		}
 	}
 
@@ -1156,6 +1272,38 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 						offset = SIGN_EXTEND(imm8, 8);
 					}
 					offset <<= 1;
+					/* Diagnostic: BTEQZ in ROM range */
+					{
+						static int bteqz_diag = 0;
+						uint32_t rpc =
+						    (uint32_t)cpu->pc & 0x3FFF;
+						if (rpc >= 0x1110u &&
+						    rpc <= 0x1120u &&
+						    bteqz_diag < 5) {
+							bteqz_diag++;
+							fprintf(stderr,
+							    "[BTEQZ_DIAG]"
+							    " PC=0x%08X"
+							    " t8=0x%016"
+							    PRIx64
+							    " t8_32=0x%08X"
+							    " taken=%d"
+							    " target=0x%08X"
+							    " #%d\n",
+							    (uint32_t)cpu->pc,
+							    cpu->cd.mips.gpr
+							    [MIPS_GPR_T8],
+							    (uint32_t)cpu->cd
+							    .mips.gpr
+							    [MIPS_GPR_T8],
+							    (cpu->cd.mips.gpr
+							    [MIPS_GPR_T8]
+							    == 0) ? 1 : 0,
+							    (uint32_t)(cpu->pc
+							    + 2 + offset),
+							    bteqz_diag);
+						}
+					}
 					if (cpu->cd.mips.gpr[MIPS_GPR_T8]
 					    == 0) {
 						cpu->pc = cpu->pc + 2 +

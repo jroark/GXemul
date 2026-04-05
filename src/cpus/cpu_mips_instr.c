@@ -1014,6 +1014,25 @@ X(jr_ra)
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
 		if (rs & 1) {
+			/* Debug: track s0 on MIPS32→MIPS16 return */
+			{
+				static int jr_m16_count = 0;
+				uint32_t ret_pc = (uint32_t)(rs & ~(MODE_int_t)1);
+				if (jr_m16_count < 40) {
+					jr_m16_count++;
+					fprintf(stderr,
+					    "[JR_M16] RA=0x%08X"
+					    " s0=0x%08X a0=0x%08X"
+					    " PC=0x%08X #%d\n",
+					    (uint32_t)rs,
+					    (uint32_t)cpu->cd.mips
+					    .gpr[16],
+					    (uint32_t)cpu->cd.mips
+					    .gpr[4],
+					    (uint32_t)cpu->pc,
+					    jr_m16_count);
+				}
+			}
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->delay_slot = NOT_DELAYED;
