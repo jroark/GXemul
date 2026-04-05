@@ -53,6 +53,36 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 #define	M16REG(x)	cpu->cd.mips.gpr[mips16_reg_map[(x) & 7]]
 
 /*
+ *  ROM MIPS16 call/return tracing (diagnostic, rate-limited).
+ */
+#define ROM_CALL_LOG_MAX  200
+static int rom_call_log_count = 0;
+
+static void rom_m16_log_call(struct cpu *cpu, const char *type,
+    uint32_t target)
+{
+	uint32_t pc32 = (uint32_t)cpu->pc;
+
+	if (pc32 < 0x9FC00000u || pc32 > 0x9FC03FFFu)
+		return;
+	if (rom_call_log_count >= ROM_CALL_LOG_MAX)
+		return;
+	rom_call_log_count++;
+
+	fprintf(stderr,
+	    "[M16_CALL] %s PC=0x%08X->0x%08X SP=0x%08X RA=0x%08X"
+	    " a0=0x%08X a1=0x%08X s0=0x%08X s1=0x%08X #%d\n",
+	    type, pc32, target,
+	    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
+	    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_RA],
+	    (uint32_t)cpu->cd.mips.gpr[4],
+	    (uint32_t)cpu->cd.mips.gpr[5],
+	    (uint32_t)cpu->cd.mips.gpr[16],
+	    (uint32_t)cpu->cd.mips.gpr[17],
+	    rom_call_log_count);
+}
+
+/*
  *  When a MIPS16 memory access fails, check if it was a TLB exception
  *  (EXL now set in Status).  If so, return 1 — the exception was taken
  *  and the exception handler will run.  Only kill the CPU for true
@@ -608,7 +638,6 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		return 0;
 	}
 
-
 	/*  Fetch the instruction  */
 	iw = m16_fetch(cpu, addr, &ok);
 	if (!ok) {
@@ -808,6 +837,9 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			if (cpu->machine->show_trace_tree)
 				cpu_functioncall_trace(cpu,
 				    cpu->cd.mips.m16_delay_target);
+			rom_m16_log_call(cpu,
+			    jalx ? "JALX" : "JAL ",
+			    (uint32_t)cpu->cd.mips.m16_delay_target);
 			return 1;
 		}
 
@@ -883,9 +915,10 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		{
 			int imm4;
 			if (extended) {
-				imm4 = ((extend_word & 0xf) << 11) |
-				    (iw & 0xf);
-				imm4 = SIGN_EXTEND(imm4, 15);
+				imm4 = ((extend_word & 0x1f) << 11) |
+				    ((extend_word >> 5) & 0x3f) << 5 |
+				    (iw & 0x1f);
+				imm4 = SIGN_EXTEND(imm4, 16);
 			} else {
 				imm4 = SIGN_EXTEND(iw & 0xf, 4);
 			}
@@ -1383,6 +1416,15 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    cpu->machine->show_trace_tree)
 					cpu_functioncall_trace(cpu,
 					    target & ~(uint64_t)1);
+				if (is_jalr)
+					rom_m16_log_call(cpu, "JALR",
+					    (uint32_t)(target & ~(uint64_t)1));
+				else if (rx == 0)
+					rom_m16_log_call(cpu, "RET ",
+					    (uint32_t)(target & ~(uint64_t)1));
+				else
+					rom_m16_log_call(cpu, "JR  ",
+					    (uint32_t)(target & ~(uint64_t)1));
 				return 1;
 			}
 		case M16_RR_JALR:
@@ -1399,6 +1441,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				cpu->delay_slot = TO_BE_DELAYED;
 				if (cpu->machine->show_trace_tree)
 					cpu_functioncall_trace(cpu, cpu->pc);
+				rom_m16_log_call(cpu, "JALR",
+				    (uint32_t)(target & ~(uint64_t)1));
 				return 1;
 			}
 		case M16_RR_SLT:
