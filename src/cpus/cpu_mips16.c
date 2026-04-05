@@ -58,6 +58,33 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 #define ROM_CALL_LOG_MAX  500
 static int rom_call_log_count = 0;
 
+/*
+ *  SP change tracing — logs every SP modification during ROM MIPS16 execution.
+ */
+#define SP_TRACE_MAX  200
+static int sp_trace_count = 0;
+static uint32_t sp_trace_last = 0;
+
+static void rom_m16_sp_trace(struct cpu *cpu)
+{
+	uint32_t pc32 = (uint32_t)cpu->pc;
+	uint32_t cur_sp = (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP];
+
+	if (pc32 < 0x9FC00000u || pc32 > 0x9FC03FFFu)
+		return;
+	if (cur_sp == sp_trace_last)
+		return;
+	if (sp_trace_count >= SP_TRACE_MAX)
+		return;
+	sp_trace_count++;
+	fprintf(stderr,
+	    "[SP_TRACE] PC=0x%08X SP: 0x%08X -> 0x%08X  RA=0x%08X #%d\n",
+	    pc32, sp_trace_last, cur_sp,
+	    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_RA],
+	    sp_trace_count);
+	sp_trace_last = cur_sp;
+}
+
 static void rom_m16_log_call(struct cpu *cpu, const char *type,
     uint32_t target)
 {
@@ -71,7 +98,8 @@ static void rom_m16_log_call(struct cpu *cpu, const char *type,
 
 	fprintf(stderr,
 	    "[M16_CALL] %s PC=0x%08X->0x%08X SP=0x%08X RA=0x%08X"
-	    " a0=0x%08X a1=0x%08X s0=0x%08X s1=0x%08X #%d\n",
+	    " a0=0x%08X a1=0x%08X s0=0x%08X s1=0x%08X"
+	    " v0=0x%08X v1=0x%08X #%d\n",
 	    type, pc32, target,
 	    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
 	    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_RA],
@@ -79,7 +107,30 @@ static void rom_m16_log_call(struct cpu *cpu, const char *type,
 	    (uint32_t)cpu->cd.mips.gpr[5],
 	    (uint32_t)cpu->cd.mips.gpr[16],
 	    (uint32_t)cpu->cd.mips.gpr[17],
+	    (uint32_t)cpu->cd.mips.gpr[2],  /* v0 */
+	    (uint32_t)cpu->cd.mips.gpr[3],  /* v1 */
 	    rom_call_log_count);
+
+	/* Dump stack when calling epilogue 0xAD0 */
+	if (target == 0x9FC00AD0u) {
+		uint32_t sp = (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP];
+		fprintf(stderr, "[EPILOGUE_DUMP] SP=0x%08X"
+		    " a0_delay=%d (delay slot LI not yet executed)\n",
+		    sp, (int)(uint32_t)cpu->cd.mips.gpr[4]);
+		/* Read 64 bytes from SP to show what epilogue will restore */
+		for (int i = 0; i < 64; i += 4) {
+			uint8_t buf[4];
+			int ok2 = cpu->memory_rw(cpu, cpu->mem,
+			    (uint64_t)(sp + i), buf, 4, MEM_READ,
+			    CACHE_DATA);
+			uint32_t val = buf[0] | (buf[1]<<8) |
+			    (buf[2]<<16) | (buf[3]<<24);
+			fprintf(stderr, "[EPILOGUE_DUMP] [SP+%02d] = "
+			    "0x%08X (PA 0x%05X)\n",
+			    i, val, (sp + i) & 0x1FFFFFFF);
+			(void)ok2;
+		}
+	}
 }
 
 /*
@@ -519,9 +570,33 @@ static uint32_t m16_load_word(struct cpu *cpu, uint64_t addr, int *ok)
 		    (buf[0] << 24);
 }
 
+/*
+ *  Memory write watchpoint: log MIPS16 stores to the crash-area stack region.
+ *  PA 0x8000-0x80C0 is kseg0 VA 0x80008000-0x800080C0.
+ */
+#define SW_WATCH_MAX 50
+static int sw_watch_count = 0;
+
 static int m16_store_word(struct cpu *cpu, uint64_t addr, uint32_t val)
 {
 	uint8_t buf[4];
+
+	/* Watchpoint: detect writes near crash SP area */
+	if (sw_watch_count < SW_WATCH_MAX) {
+		uint32_t a32 = (uint32_t)addr;
+		/* kseg0 (0x80000000-0x9FFFFFFF) → PA by masking top 3 bits */
+		uint32_t pa = a32 & 0x1FFFFFFFu;
+		if (pa >= 0x7F00u && pa < 0x8200u) {
+			sw_watch_count++;
+			fprintf(stderr,
+			    "[SW_WATCH] PC=0x%08X SW [0x%08X]=0x%08X"
+			    " (PA=0x%05X) SP=0x%08X #%d\n",
+			    (uint32_t)cpu->pc, a32, val, pa,
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
+			    sw_watch_count);
+		}
+	}
+
 	if (cpu->byte_order == EMUL_LITTLE_ENDIAN) {
 		buf[0] = val;
 		buf[1] = val >> 8;
@@ -576,6 +651,20 @@ static uint32_t m16_load_byte(struct cpu *cpu, uint64_t addr, int *ok)
 
 static int m16_store_byte(struct cpu *cpu, uint64_t addr, uint8_t val)
 {
+	/* Watchpoint: detect byte writes near crash SP area */
+	if (sw_watch_count < SW_WATCH_MAX) {
+		uint32_t a32 = (uint32_t)addr;
+		uint32_t pa = a32 & 0x1FFFFFFFu;
+		if (pa >= 0x7F00u && pa < 0x8300u) {
+			sw_watch_count++;
+			fprintf(stderr,
+			    "[SB_WATCH] PC=0x%08X SB [0x%08X]=0x%02X"
+			    " (PA=0x%05X) SP=0x%08X #%d\n",
+			    (uint32_t)cpu->pc, a32, val, pa,
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
+			    sw_watch_count);
+		}
+	}
 	return m16_memory_rw(cpu, addr, &val, 1, 1);
 }
 
@@ -653,6 +742,9 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		}
 	}
 
+	/* Diagnostic: trace SP changes from previous instruction */
+	rom_m16_sp_trace(cpu);
+
 	/*  Fetch the instruction  */
 	iw = m16_fetch(cpu, addr, &ok);
 	if (!ok) {
@@ -724,6 +816,30 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 	rz = (iw >> 2) & 0x7;
 	sa = (iw >> 2) & 0x7;
 	func = iw & 0x1f;
+
+	/* Targeted instruction trace: ROM MIPS16 0x10EC-0x1120 */
+	{
+		static int rom_itrace_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc >= 0x10ECu && rpc <= 0x11C0u &&
+		    rom_itrace_count < 200) {
+			rom_itrace_count++;
+			fprintf(stderr,
+			    "[M16_ITRACE] PC=0x%08X iw=0x%04X op=%d"
+			    " ext=%d extw=0x%04X SP=0x%08X"
+			    " v0=0x%08X v1=0x%08X a2=0x%08X"
+			    " s0=0x%08X s1=0x%08X #%d\n",
+			    (uint32_t)cpu->pc, iw, op,
+			    extended, extend_word,
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_SP],
+			    (uint32_t)cpu->cd.mips.gpr[2],
+			    (uint32_t)cpu->cd.mips.gpr[3],
+			    (uint32_t)cpu->cd.mips.gpr[6],
+			    (uint32_t)cpu->cd.mips.gpr[16],
+			    (uint32_t)cpu->cd.mips.gpr[17],
+			    rom_itrace_count);
+		}
+	}
 
 	switch (op) {
 
