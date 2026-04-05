@@ -179,6 +179,15 @@ static void m16_tlb_fixup(struct cpu *cpu, uint64_t vaddr)
 				uint64_t bva = cpu->cd.mips.coproc[0]	\
 				    ->reg[COP0_BADVADDR];		\
 				m16_tlb_fixup(cpu, bva);		\
+				/* Restore PC and MIPS16 mode:		\
+				 * mips_cpu_exception() changed pc to	\
+				 * the BEV vector and cleared mips16.	\
+				 * Undo both so the retry re-executes	\
+				 * the faulting MIPS16 instruction. */	\
+				cpu->pc = cpu->cd.mips.coproc[0]	\
+				    ->reg[COP0_EPC]			\
+				    & ~(uint64_t)1;			\
+				cpu->cd.mips.mips16 = 1;		\
 				return 1;  /* retry on next call */	\
 			}						\
 			return 1;  /* non-TLB exception: defer */	\
@@ -637,6 +646,21 @@ static int m16_store_word(struct cpu *cpu, uint64_t addr, uint32_t val)
 		}
 	}
 
+	/* Watchpoint: detect writes to PA 0x100A0 (callback data source) */
+	{
+		static int w100a0_count = 0;
+		uint32_t pa = (uint32_t)addr & 0x1FFFFFFFu;
+		if (pa >= 0x10060u && pa < 0x100C0u &&
+		    w100a0_count < 10) {
+			w100a0_count++;
+			fprintf(stderr,
+			    "[W_100A0] PC=0x%08X SW [0x%08X]=0x%08X"
+			    " (PA=0x%05X) #%d\n",
+			    (uint32_t)cpu->pc, (uint32_t)addr,
+			    val, pa, w100a0_count);
+		}
+	}
+
 	if (cpu->byte_order == EMUL_LITTLE_ENDIAN) {
 		buf[0] = val;
 		buf[1] = val >> 8;
@@ -1044,11 +1068,13 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			fprintf(stderr, "[BUF_DUMP] PC=0x%08X"
 			    " dumping MEM[0x%08X]:\n",
 			    (uint32_t)cpu->pc, buf_va);
-			for (int j = 0; j < 64; j += 4) {
+			for (int j = 0; j < 80; j += 4) {
 				uint32_t w = m16_load_word(cpu,
 				    (uint64_t)(buf_va + j), &ok);
 				fprintf(stderr, "[BUF_DUMP]   [+%02X]"
-				    " = 0x%08X\n", j, w);
+				    " = 0x%08X%s\n", j, w,
+				    j == 0x40 ?
+				    "  <-- 0x800100A0" : "");
 			}
 			/* Dump all TLB entries */
 			int ntlb = cpu->cd.mips.cpu_type
@@ -1651,6 +1677,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 					    [COP0_STATUS] &
 					    STATUS_EXL) ? 1 : 0),
 					    lbu_diag + 1);
+					lbu_diag++;
 				}
 			}
 			val = m16_load_byte(cpu, a, &ok);
