@@ -1180,6 +1180,34 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		}
 	}
 
+	/* Trace the wrapper at 0x1048 that calls FUN_9fc010ec */
+	{
+		static int wrap_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		/* 0x106E is the JAL to FUN_9fc010ec from the wrapper */
+		if ((rpc == 0x1048u || rpc == 0x106Eu) &&
+		    wrap_count < 20) {
+			wrap_count++;
+			fprintf(stderr,
+			    "[WRAP_%04X] PC=0x%08X #%d"
+			    " v0=0x%08X v1=0x%08X"
+			    " a0=0x%08X a1=0x%08X"
+			    " a2=0x%08X a3=0x%08X"
+			    " s0=0x%08X s1=0x%08X"
+			    " s2=0x%08X\n",
+			    rpc,
+			    (uint32_t)cpu->pc, wrap_count,
+			    (uint32_t)cpu->cd.mips.gpr[2],
+			    (uint32_t)cpu->cd.mips.gpr[3],
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->cd.mips.gpr[5],
+			    (uint32_t)cpu->cd.mips.gpr[6],
+			    (uint32_t)cpu->cd.mips.gpr[7],
+			    (uint32_t)cpu->cd.mips.gpr[16],
+			    (uint32_t)cpu->cd.mips.gpr[17],
+			    (uint32_t)cpu->cd.mips.gpr[18]);
+		}
+	}
 	/* Trace FUN_9fc01318 entry (DMA command setup) */
 	{
 		static int f1318_count = 0;
