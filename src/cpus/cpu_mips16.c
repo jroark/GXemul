@@ -1180,6 +1180,25 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		}
 	}
 
+	/* Trace FUN_9fc01318 entry (DMA command setup) */
+	{
+		static int f1318_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x1318u && f1318_count < 10) {
+			f1318_count++;
+			fprintf(stderr,
+			    "[FUN_1318] PC=0x%08X #%d"
+			    " a0=0x%08X a1=0x%08X"
+			    " a2=0x%08X a3=0x%08X"
+			    " RA=0x%08X\n",
+			    (uint32_t)cpu->pc, f1318_count,
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->cd.mips.gpr[5],
+			    (uint32_t)cpu->cd.mips.gpr[6],
+			    (uint32_t)cpu->cd.mips.gpr[7],
+			    (uint32_t)cpu->cd.mips.gpr[MIPS_GPR_RA]);
+		}
+	}
 	/* Dump NAND device struct at FUN_9fc010ec entry */
 	{
 		static int bufdump_count = 0;
@@ -1482,10 +1501,40 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		{
 			int imm4;
 			if (extended) {
-				imm4 = ((extend_word & 0x1f) << 11) |
-				    ((extend_word >> 5) & 0x3f) << 5 |
-				    (iw & 0x1f);
-				imm4 = SIGN_EXTEND(imm4, 16);
+				/*
+				 * MIPS16e RRI-A (ADDIU ry,rx,imm) extended:
+				 * The 11-bit extend field [10:0] provides
+				 * bits [10:4] of the immediate, and base[3:0]
+				 * fills in bits [3:0].  The result is an
+				 * 11-bit signed value (not 16-bit like the
+				 * generic EXTEND formula for other opcodes).
+				 */
+				imm4 = (extend_word & 0x7ff) | (iw & 0xf);
+				imm4 = SIGN_EXTEND(imm4, 11);
+				/* Diagnostic: trace RRIA extended at key PCs */
+				{
+					uint32_t rpc =
+					    (uint32_t)cpu->pc & 0x3FFF;
+					static int rria_diag = 0;
+					if (rria_diag < 20 ||
+					    rpc == 0x1132u) {
+						rria_diag++;
+						fprintf(stderr,
+						    "[RRIA_EXT] PC=0x%08X"
+						    " ext=0x%04X iw=0x%04X"
+						    " imm=%d (0x%X)"
+						    " rx_val=0x%08X"
+						    " result=0x%08X #%d\n",
+						    (uint32_t)cpu->pc,
+						    extend_word, iw,
+						    imm4, imm4 & 0xFFFF,
+						    (uint32_t)M16REG(rx),
+						    (uint32_t)(
+						    (int32_t)M16REG(rx) +
+						    imm4),
+						    rria_diag);
+					}
+				}
 			} else {
 				imm4 = SIGN_EXTEND(iw & 0xf, 4);
 			}
