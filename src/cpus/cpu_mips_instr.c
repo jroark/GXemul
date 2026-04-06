@@ -1135,6 +1135,23 @@ X(jalr)
 	    MIPS_INSTR_ALIGNMENT_SHIFT);
 	rd += (int32_t)ic->arg[2];
 	reg(ic->arg[1]) = rd;
+	/* Diagnostic: trace JALR at 0x3A8 in the boot loop */
+	{
+		uint32_t pc32 = (uint32_t)(cpu->pc &
+		    ~((MIPS_IC_ENTRIES_PER_PAGE-1) <<
+		    MIPS_INSTR_ALIGNMENT_SHIFT));
+		pc32 += (int32_t)ic->arg[2] - 8;
+		static int jalr_3a8_count = 0;
+		if ((pc32 & 0x1FFF) == 0x3A8 && jalr_3a8_count < 10) {
+			jalr_3a8_count++;
+			fprintf(stderr,
+			    "[JALR_3A8] PC=0x%08X target=0x%08llX"
+			    " RA=0x%08llX #%d\n",
+			    pc32, (unsigned long long)rs,
+			    (unsigned long long)rd,
+			    jalr_3a8_count);
+		}
+	}
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
