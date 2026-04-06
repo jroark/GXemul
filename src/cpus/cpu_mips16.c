@@ -678,6 +678,21 @@ static int sw_watch_count = 0;
 
 static int m16_store_word(struct cpu *cpu, uint64_t addr, uint32_t val)
 {
+	/* Trace SW to VRC4173/NAND I/O range */
+	{
+		uint32_t pa = (uint32_t)addr & 0x1FFFFFFFu;
+		static int sw_nand_count = 0;
+		if (pa >= 0x0A000000u && pa < 0x0B000000u &&
+		    sw_nand_count < 20) {
+			sw_nand_count++;
+			fprintf(stderr,
+			    "[SW_NAND] PC=0x%08X addr=0x%08X"
+			    " val=0x%08X PA=0x%08X #%d\n",
+			    (uint32_t)cpu->pc,
+			    (uint32_t)addr, val, pa,
+			    sw_nand_count);
+		}
+	}
 	uint8_t buf[4];
 
 	/* Watchpoint: detect writes near crash SP area */
@@ -1180,6 +1195,48 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		}
 	}
 
+	/*
+	 * WORKAROUND: Ensure the NAND device descriptor base pointer
+	 * at 0x80010030 is set when device 2's init (FUN_9fc019d4)
+	 * runs.  The ROM init chain should set this to 0x80010040
+	 * (the device register table populated by FUN_9fc012a0), but
+	 * our code relocation and SDRAM test leave it uninitialized.
+	 * Device 2 dereferences *(0x80010030) to find NAND registers;
+	 * without this, it reads address 0 and never configures the
+	 * XFER engine.
+	 */
+	{
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x19D4u || rpc == 0x19D6u) {
+			static int fixup_done = 0;
+			if (!fixup_done) {
+				uint32_t ptr_val;
+				int ok_local = 1;
+				ptr_val = m16_load_word(cpu,
+				    0x80010030ULL, &ok_local);
+				fprintf(stderr,
+				    "[DEV2_FIXUP] PC=0x%08X"
+				    " *(0x80010030)=0x%08X"
+				    " ok=%d\n",
+				    (uint32_t)cpu->pc,
+				    ptr_val, ok_local);
+				if (ok_local && ptr_val != 0x80010040) {
+					/*
+					 * Use store_32bit_word to ensure
+					 * dyntrans cache is invalidated.
+					 */
+					store_32bit_word(cpu,
+					    0xffffffff80010030ULL,
+					    0x80010040);
+					fixup_done = 1;
+					fprintf(stderr,
+					    "[DEV2_FIXUP] Set"
+					    " *(0x80010030)="
+					    "0x80010040\n");
+				}
+			}
+		}
+	}
 	/* Trace the wrapper at 0x1048 that calls FUN_9fc010ec */
 	{
 		static int wrap_count = 0;
@@ -1206,6 +1263,48 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			    (uint32_t)cpu->cd.mips.gpr[16],
 			    (uint32_t)cpu->cd.mips.gpr[17],
 			    (uint32_t)cpu->cd.mips.gpr[18]);
+		}
+	}
+	/* Per-instruction trace for FUN_9fc01d98 (0x1D98-0x1DA8) */
+	{
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		static int d98pc_count = 0;
+		if (rpc >= 0x1D98u && rpc <= 0x1DA8u &&
+		    d98pc_count < 30) {
+			/* Fetch the instruction word to check decode */
+			uint16_t chk_iw = m16_fetch(cpu, cpu->pc, &ok);
+			d98pc_count++;
+			fprintf(stderr,
+			    "[PC_1D9x] PC=0x%08X #%d"
+			    " iw=0x%04X op=%d"
+			    " v0=0x%08X v1=0x%08X"
+			    " a3=0x%08X delay=%d\n",
+			    (uint32_t)cpu->pc, d98pc_count,
+			    chk_iw, chk_iw >> 11,
+			    (uint32_t)cpu->cd.mips.gpr[2],
+			    (uint32_t)cpu->cd.mips.gpr[3],
+			    (uint32_t)cpu->cd.mips.gpr[7],
+			    cpu->delay_slot);
+		}
+	}
+	/* Trace FUN_9fc01d98 entry (device 2 NAND init) */
+	{
+		static int d98_count = 0;
+		uint32_t rpc = (uint32_t)cpu->pc & 0x3FFF;
+		if (rpc == 0x1D98u && d98_count < 3) {
+			d98_count++;
+			uint32_t a0v = (uint32_t)cpu->cd.mips.gpr[4];
+			/* Read what the function will dereference */
+			uint32_t base = m16_load_word(cpu,
+			    (uint64_t)a0v, &ok);
+			uint32_t fld2 = m16_load_word(cpu,
+			    (uint64_t)(a0v + 8), &ok);
+			fprintf(stderr,
+			    "[FUN_1D98] PC=0x%08X #%d"
+			    " a0=0x%08X *a0=0x%08X"
+			    " a0[2]=0x%08X\n",
+			    (uint32_t)cpu->pc, d98_count,
+			    a0v, base, fld2);
 		}
 	}
 	/* Trace FUN_9fc01318 entry (DMA command setup) */
@@ -2086,6 +2185,24 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		{
 			int offset5 = iw & 0x1f;
 			uint64_t a;
+			/* Debug: unconditional trace for FUN_9fc01d98 */
+			{
+				uint32_t rpc2 = (uint32_t)cpu->pc & 0x3FFF;
+				static int sw1d9_count = 0;
+				if (rpc2 >= 0x1D98 && rpc2 <= 0x1DA8 &&
+				    sw1d9_count < 5) {
+					sw1d9_count++;
+					fprintf(stderr,
+					    "[SW_1D9x] PC=0x%08X iw=0x%04X"
+					    " rx=%d ry=%d off5=%d"
+					    " Mrx=0x%08X Mry=0x%08X #%d\n",
+					    (uint32_t)cpu->pc, iw,
+					    rx, ry, offset5,
+					    (uint32_t)M16REG(rx),
+					    (uint32_t)M16REG(ry),
+					    sw1d9_count);
+				}
+			}
 			if (extended) {
 				offset5 = ((extend_word & 0x1f) << 11) |
 				    ((extend_word >> 5) & 0x3f) << 5 |
@@ -2096,6 +2213,38 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
+			{
+				uint32_t pa = (uint32_t)a & 0x1FFFFFFFu;
+				static int sw_dbg = 0;
+				if (pa >= 0x0A000000u && pa < 0x0B000000u
+				    && sw_dbg < 5) {
+					sw_dbg++;
+					fprintf(stderr,
+					    "[SW_CASE] PC=0x%08X"
+					    " addr=0x%llX"
+					    " val=0x%08X #%d\n",
+					    (uint32_t)cpu->pc,
+					    (unsigned long long)a,
+					    (uint32_t)M16REG(ry),
+					    sw_dbg);
+				}
+			}
+			{
+				uint32_t pa2 = (uint32_t)a & 0x1FFFFFFFu;
+				static int sw_pre = 0;
+				if (pa2 >= 0x0A000000u && pa2 < 0x0B000000u
+				    && sw_pre < 5) {
+					sw_pre++;
+					fprintf(stderr,
+					    "[SW_PRE] PC=0x%08X"
+					    " a=0x%llX val=0x%08X"
+					    " pa=0x%08X #%d\n",
+					    (uint32_t)cpu->pc,
+					    (unsigned long long)a,
+					    (uint32_t)M16REG(ry),
+					    pa2, sw_pre);
+				}
+			}
 			if (!m16_store_word(cpu, a, M16REG(ry))) {
 				cpu->running = 0;
 				return 0;

@@ -529,7 +529,8 @@ not just the device in question.
 		 * around 0x80010010 (PA 0x10000-0x10020) to discover what
 		 * code populates the B000FF signature reference buffer.
 		 */
-		if (paddr >= 0x10000 && paddr < 0x10020) {
+		if ((paddr >= 0x10000 && paddr < 0x10020) ||
+		    (paddr >= 0x10030 && paddr < 0x10050)) {
 			uint64_t val = 0;
 			for (size_t i = 0; i < len && i < 8; i++)
 				val |= (uint64_t)data[i] << (8 * i);
