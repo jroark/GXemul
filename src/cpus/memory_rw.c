@@ -541,6 +541,21 @@ not just the device in question.
 			    (unsigned long long)val,
 			    (uint32_t)cpu->pc);
 		}
+		if (paddr >= 0x7c00 && paddr < 0x7d20) {
+			static int stack_watch_count = 0;
+			if (stack_watch_count < 256) {
+				uint64_t val = 0;
+				for (size_t i = 0; i < len && i < 8; i++)
+					val |= (uint64_t)data[i] << (8 * i);
+				fprintf(stderr,
+				    "[STACK_WATCH] W PA=0x%08llX len=%zu val=0x%llX"
+				    " PC=0x%08X\n",
+				    (unsigned long long)paddr, len,
+				    (unsigned long long)val,
+				    (uint32_t)cpu->pc);
+				stack_watch_count++;
+			}
+		}
 		if ((len != 0 && paddr < 0x2404 && (paddr + len) > 0x2400) ||
 		    (len != 0 && paddr < 0x2500 && (paddr + len) > 0x24fc)) {
 			uint64_t val = 0;

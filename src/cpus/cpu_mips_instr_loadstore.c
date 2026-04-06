@@ -284,6 +284,61 @@ void LS_N(struct cpu *cpu, struct mips_instr_call *ic)
 		    addr32, (uint32_t)reg(ic->arg[0]), store_pc);
 	}
 #endif
+	if ((addr32 >= 0x80010000u && addr32 < 0x80010020u) ||
+	    (addr32 >= 0x80010030u && addr32 < 0x80010050u)) {
+		static int lowram_fast_count = 0;
+		if (lowram_fast_count < 256) {
+			int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+			    / sizeof(struct mips_instr_call);
+			uint32_t store_pc = (uint32_t)(cpu->pc &
+			    ~((MIPS_IC_ENTRIES_PER_PAGE - 1)
+			    << MIPS_INSTR_ALIGNMENT_SHIFT));
+			uint64_t raw = 0;
+			store_pc += (uint32_t)(low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
+#ifdef LS_8
+			raw = *(uint64_t *)(ic->arg[0]);
+#else
+			raw = (uint32_t)reg(ic->arg[0]);
+#endif
+			fprintf(stderr,
+			    "[LOWRAM_FAST] W VA=0x%08X len=%d val=0x%0*llX"
+			    " PC=0x%08X\n",
+			    addr32, LS_SIZE, LS_SIZE * 2,
+			    (unsigned long long)(raw &
+			        (LS_SIZE == 8 ? ~0ULL :
+			         ((1ULL << (LS_SIZE * 8)) - 1))),
+			    store_pc);
+			lowram_fast_count++;
+		}
+	}
+	if (addr32 >= 0xA0007C00u && addr32 < 0xA0007D20u) {
+		static int fat_copy_count = 0;
+		if (fat_copy_count < 128) {
+			int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+			    / sizeof(struct mips_instr_call);
+			uint32_t store_pc = (uint32_t)(cpu->pc &
+			    ~((MIPS_IC_ENTRIES_PER_PAGE - 1)
+			    << MIPS_INSTR_ALIGNMENT_SHIFT));
+			uint64_t raw = 0;
+			store_pc += (uint32_t)(low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
+#ifdef LS_8
+			raw = *(uint64_t *)(ic->arg[0]);
+#else
+			raw = (uint32_t)reg(ic->arg[0]);
+#endif
+			if (store_pc == 0x9FC01182u) {
+				fprintf(stderr,
+				    "[FAT_COPY] W VA=0x%08X len=%d val=0x%0*llX"
+				    " PC=0x%08X\n",
+				    addr32, LS_SIZE, LS_SIZE * 2,
+				    (unsigned long long)(raw &
+				        (LS_SIZE == 8 ? ~0ULL :
+				         ((1ULL << (LS_SIZE * 8)) - 1))),
+				    store_pc);
+				fat_copy_count++;
+			}
+		}
+	}
 
 #ifdef LS_1
 	p[addr] = reg(ic->arg[0]);
