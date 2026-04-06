@@ -43,6 +43,7 @@
 void LS_GENERIC_N(struct cpu *cpu, struct mips_instr_call *ic)
 {
 	MODE_int_t addr = reg(ic->arg[1]) + (int32_t)ic->arg[2];
+	uint32_t addr32 = (uint32_t)addr;
 	uint8_t data[LS_SIZE];
 #ifdef LS_LOAD
 	uint64_t x;
@@ -125,6 +126,13 @@ void LS_GENERIC_N(struct cpu *cpu, struct mips_instr_call *ic)
 	reg(ic->arg[0]) = x;
 #else	/*  LS_STORE:  */
 	memory_writemax64(cpu, data, LS_SIZE, reg(ic->arg[0]));
+	if (addr32 >= 0xa0002400u && addr32 < 0xa0002500u) {
+		fprintf(stderr,
+		    "[MAILBOX_GENERIC] W VA=0x%08X len=%d val=0x%08X"
+		    " PC=0x%08X\n",
+		    addr32, LS_SIZE, (uint32_t)reg(ic->arg[0]),
+		    (uint32_t)cpu->pc);
+	}
 	if (!cpu->memory_rw(cpu, cpu->mem, addr, data, sizeof(data),
 	    MEM_WRITE, CACHE_DATA)) {
 		/*  Exception.  */
@@ -140,6 +148,7 @@ void LS_GENERIC_N(struct cpu *cpu, struct mips_instr_call *ic)
 void LS_N(struct cpu *cpu, struct mips_instr_call *ic)
 {
 	MODE_uint_t addr = reg(ic->arg[1]) + (int32_t)ic->arg[2];
+	uint32_t addr32 = (uint32_t)addr;
 	unsigned char *p;
 #ifdef MODE32
 #ifdef LS_LOAD
@@ -262,6 +271,20 @@ void LS_N(struct cpu *cpu, struct mips_instr_call *ic)
 #else
 	/*  Store: */
 
+#ifdef LS_4
+	if (addr32 >= 0xa0002400u && addr32 < 0xa0002500u) {
+		int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+		    / sizeof(struct mips_instr_call);
+		uint32_t store_pc = (uint32_t)(cpu->pc &
+		    ~((MIPS_IC_ENTRIES_PER_PAGE - 1)
+		    << MIPS_INSTR_ALIGNMENT_SHIFT));
+		store_pc += (uint32_t)(low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
+		fprintf(stderr,
+		    "[MAILBOX_FAST] W VA=0x%08X val=0x%08X PC=0x%08X\n",
+		    addr32, (uint32_t)reg(ic->arg[0]), store_pc);
+	}
+#endif
+
 #ifdef LS_1
 	p[addr] = reg(ic->arg[0]);
 #endif
@@ -322,4 +345,3 @@ void LS_N(struct cpu *cpu, struct mips_instr_call *ic)
 
 #endif	/*  store  */
 }
-

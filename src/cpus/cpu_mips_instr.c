@@ -128,18 +128,23 @@ X(invalid)
 static void mips_log_lowram_control_target(struct cpu *cpu,
     const char *kind, MODE_int_t target)
 {
-	static int lowram_ctl_count = 0;
+	static int ctl_count = 0;
 	uint32_t t32 = (uint32_t) target;
+	int in_lowram = t32 >= 0x80000000u && t32 < 0x80020000u;
+	int in_spl = t32 >= 0x80f00000u && t32 < 0x80f10000u;
+	int in_nk = t32 >= 0x80060000u && t32 < 0x80080000u;
+	int in_rom_gate = t32 >= 0x9fc00300u && t32 < 0x9fc00400u;
 
-	if (t32 < 0x80000000u || t32 >= 0x80020000u || lowram_ctl_count >= 20)
+	if ((!in_lowram && !in_spl && !in_nk && !in_rom_gate) || ctl_count >= 80)
 		return;
 
-	lowram_ctl_count++;
+	ctl_count++;
 	fprintf(stderr,
-	    "[LOWRAM_CTL] kind=%s pc=0x%08X target=0x%08X"
+	    "[ROM_CTL] kind=%s pc=0x%08X target=0x%08X"
 	    " sp=0x%08X ra=0x%08X fp=0x%08X"
 	    " a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X"
-	    " s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X #%d\n",
+	    " s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X"
+	    " lowram=%d spl=%d nk=%d rom_gate=%d #%d\n",
 	    kind,
 	    (uint32_t) cpu->pc,
 	    t32,
@@ -154,7 +159,7 @@ static void mips_log_lowram_control_target(struct cpu *cpu,
 	    (uint32_t) cpu->cd.mips.gpr[17],
 	    (uint32_t) cpu->cd.mips.gpr[18],
 	    (uint32_t) cpu->cd.mips.gpr[19],
-	    lowram_ctl_count);
+	    in_lowram, in_spl, in_nk, in_rom_gate, ctl_count);
 }
 #endif
 
@@ -213,11 +218,28 @@ X(beq)
 {
 	MODE_int_t old_pc = cpu->pc;
 	MODE_uint_t rs = reg(ic->arg[0]), rt = reg(ic->arg[1]);
+	int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+	    / sizeof(struct mips_instr_call);
+	uint32_t branch_pc = (uint32_t)(cpu->pc &
+	    ~((MIPS_IC_ENTRIES_PER_PAGE - 1) <<
+	    MIPS_INSTR_ALIGNMENT_SHIFT));
+	branch_pc += (uint32_t)(low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
 	int x = rs == rt;
 	cpu->delay_slot = TO_BE_DELAYED;
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
+		if (branch_pc == 0x9fc003c0u) {
+			fprintf(stderr,
+			    "[ROM_GATE_BEQ] pc=0x%08X v0=0x%08X zero=0x%08X"
+			    " taken=%d next=0x%08X\n",
+			    branch_pc, (uint32_t)rs, (uint32_t)rt, x,
+			    x ? (uint32_t)((old_pc &
+			        ~((MIPS_IC_ENTRIES_PER_PAGE - 1) <<
+			        MIPS_INSTR_ALIGNMENT_SHIFT)) +
+			        (int32_t)ic->arg[2])
+			      : (uint32_t)(branch_pc + 8));
+		}
 		/*  Note: Must be non-delayed when jumping to the new pc:  */
 		cpu->delay_slot = NOT_DELAYED;
 		if (x) {
@@ -233,11 +255,23 @@ X(beq)
 X(beq_samepage)
 {
 	MODE_uint_t rs = reg(ic->arg[0]), rt = reg(ic->arg[1]);
+	int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+	    / sizeof(struct mips_instr_call);
+	uint32_t branch_pc = (uint32_t)(cpu->pc &
+	    ~((MIPS_IC_ENTRIES_PER_PAGE - 1) <<
+	    MIPS_INSTR_ALIGNMENT_SHIFT));
+	branch_pc += (uint32_t)(low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
 	int x = rs == rt;
 	cpu->delay_slot = TO_BE_DELAYED;
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
+		if (branch_pc == 0x9fc003c0u) {
+			fprintf(stderr,
+			    "[ROM_GATE_BEQ] pc=0x%08X v0=0x%08X zero=0x%08X"
+			    " taken=%d\n",
+			    branch_pc, (uint32_t)rs, (uint32_t)rt, x);
+		}
 		if (x)
 			cpu->cd.mips.next_ic = (struct mips_instr_call *)
 			    ic->arg[2];
@@ -260,7 +294,19 @@ X(beq_samepage_addiu)
 X(beq_samepage_nop)
 {
 	MODE_uint_t rs = reg(ic->arg[0]), rt = reg(ic->arg[1]);
+	int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+	    / sizeof(struct mips_instr_call);
+	uint32_t branch_pc = (uint32_t)(cpu->pc &
+	    ~((MIPS_IC_ENTRIES_PER_PAGE - 1) <<
+	    MIPS_INSTR_ALIGNMENT_SHIFT));
+	branch_pc += (uint32_t)(low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
 	cpu->n_translated_instrs ++;
+	if (branch_pc == 0x9fc003c0u) {
+		fprintf(stderr,
+		    "[ROM_GATE_BEQ] pc=0x%08X v0=0x%08X zero=0x%08X"
+		    " taken=%d\n",
+		    branch_pc, (uint32_t)rs, (uint32_t)rt, rs == rt);
+	}
 	if (rs == rt)
 		cpu->cd.mips.next_ic = (struct mips_instr_call *) ic->arg[2];
 	else
@@ -1022,10 +1068,21 @@ X(bgtzl_samepage)
 X(jr)
 {
 	MODE_int_t rs = reg(ic->arg[0]);
+	int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+	    / sizeof(struct mips_instr_call);
+	uint32_t branch_pc = (uint32_t)(cpu->pc &
+	    ~((MIPS_IC_ENTRIES_PER_PAGE - 1) <<
+	    MIPS_INSTR_ALIGNMENT_SHIFT));
+	branch_pc += (uint32_t)(low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
 	cpu->delay_slot = TO_BE_DELAYED;
 	ic[1].f(cpu, ic+1);
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
+		if (branch_pc == 0x9fc003d4u) {
+			fprintf(stderr,
+			    "[ROM_SPL_JUMP] pc=0x%08X target=0x%08X mips16=%d\n",
+			    branch_pc, (uint32_t)rs, (rs & 1) != 0);
+		}
 		mips_log_lowram_control_target(cpu, "jr", rs);
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
@@ -1045,8 +1102,67 @@ X(jr)
 X(jr_ra)
 {
 	MODE_int_t rs = cpu->cd.mips.gpr[MIPS_GPR_RA];
+	uint32_t branch_pc = (uint32_t)cpu->pc;
+	uint32_t a0 = (uint32_t)cpu->cd.mips.gpr[4];
+	uint32_t a1 = (uint32_t)cpu->cd.mips.gpr[5];
+	int trace_mailbox_return =
+	    a1 == 0xa0002400u ||
+	    a0 == 0x03020101u ||
+	    a0 == 0x80f00004u;
+	int trace_gate_return = (uint32_t)rs == 0x9fc003c0u;
+	int delay_exception;
+
+	if (trace_mailbox_return) {
+		Dl_info ic1_info;
+		int ic1_store_sig =
+		    ic[1].arg[0] == (size_t)&cpu->cd.mips.gpr[4] &&
+		    ic[1].arg[1] == (size_t)&cpu->cd.mips.gpr[5] &&
+		    (int32_t)ic[1].arg[2] == 0;
+		int ic1_nothing = ic[1].f == nothing_call.f;
+		const char *ic1_name = "?";
+		memset(&ic1_info, 0, sizeof(ic1_info));
+		if (dladdr((void *)ic[1].f, &ic1_info) != 0 && ic1_info.dli_sname)
+			ic1_name = ic1_info.dli_sname;
+		fprintf(stderr,
+		    "[MAILBOX_JR] before pc=0x%08X ra=0x%08X"
+		    " a0=0x%08X a1=0x%08X delay=%d"
+		    " ic1=%p name=%s store_sig=%d nothing=%d"
+		    " arg0=%p arg1=%p arg2=%d\n",
+		    branch_pc, (uint32_t)rs, a0, a1,
+		    cpu->delay_slot, (void *)ic[1].f,
+		    ic1_name, ic1_store_sig, ic1_nothing,
+		    (void *)ic[1].arg[0], (void *)ic[1].arg[1],
+		    (int32_t)ic[1].arg[2]);
+	}
+	if (trace_gate_return) {
+		fprintf(stderr,
+		    "[GATE_JR] before pc=0x%08X ra=0x%08X"
+		    " a0=0x%08X v0=0x%08X ic1=%p\n",
+		    branch_pc, (uint32_t)rs, a0,
+		    (uint32_t)cpu->cd.mips.gpr[2], (void *)ic[1].f);
+	}
 	cpu->delay_slot = TO_BE_DELAYED;
 	ic[1].f(cpu, ic+1);
+	delay_exception = !!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT);
+	if (trace_mailbox_return) {
+		fprintf(stderr,
+		    "[MAILBOX_JR] after_delay pc=0x%08X ra=0x%08X"
+		    " a0=0x%08X a1=0x%08X delay=%d exc=%d next_ic=%p\n",
+		    branch_pc, (uint32_t)rs,
+		    (uint32_t)cpu->cd.mips.gpr[4],
+		    (uint32_t)cpu->cd.mips.gpr[5],
+		    cpu->delay_slot, delay_exception,
+		    (void *)cpu->cd.mips.next_ic);
+	}
+	if (trace_gate_return) {
+		fprintf(stderr,
+		    "[GATE_JR] after_delay pc=0x%08X ra=0x%08X"
+		    " a0=0x%08X v0=0x%08X delay=%d exc=%d\n",
+		    branch_pc, (uint32_t)rs,
+		    (uint32_t)cpu->cd.mips.gpr[4],
+		    (uint32_t)cpu->cd.mips.gpr[2],
+		    cpu->delay_slot, delay_exception);
+	}
 	cpu->n_translated_instrs ++;
 	if (likely(!(cpu->delay_slot & EXCEPTION_IN_DELAY_SLOT))) {
 		mips_log_lowram_control_target(cpu, "jr_ra", rs);
@@ -1081,8 +1197,27 @@ X(jr_ra)
 			cpu->delay_slot = NOT_DELAYED;
 			quick_pc_to_pointers(cpu);
 		}
+		if (trace_mailbox_return) {
+			fprintf(stderr,
+			    "[MAILBOX_JR] taken pc=0x%08X target=0x%08X"
+			    " mips16=%d delay=%d\n",
+			    branch_pc, (uint32_t)cpu->pc,
+			    cpu->cd.mips.mips16, cpu->delay_slot);
+		}
+		if (trace_gate_return) {
+			fprintf(stderr,
+			    "[GATE_JR] taken pc=0x%08X target=0x%08X"
+			    " v0=0x%08X\n",
+			    branch_pc, (uint32_t)cpu->pc,
+			    (uint32_t)cpu->cd.mips.gpr[2]);
+		}
 	} else
 		cpu->delay_slot = NOT_DELAYED;
+	if (trace_mailbox_return && delay_exception) {
+		fprintf(stderr,
+		    "[MAILBOX_JR] exception pc=0x%08X delay=%d\n",
+		    branch_pc, cpu->delay_slot);
+	}
 }
 X(jr_ra_addiu)
 {
@@ -1146,9 +1281,12 @@ X(jalr)
 			jalr_3a8_count++;
 			fprintf(stderr,
 			    "[JALR_3A8] PC=0x%08X target=0x%08llX"
-			    " RA=0x%08llX #%d\n",
+			    " RA=0x%08llX v0=0x%08X a0=0x%08X a1=0x%08X #%d\n",
 			    pc32, (unsigned long long)rs,
 			    (unsigned long long)rd,
+			    (uint32_t)cpu->cd.mips.gpr[2],
+			    (uint32_t)cpu->cd.mips.gpr[4],
+			    (uint32_t)cpu->cd.mips.gpr[5],
 			    jalr_3a8_count);
 		}
 	}

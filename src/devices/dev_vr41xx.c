@@ -717,6 +717,7 @@ DEVICE_ACCESS(vr41xx)
 	/*  TODO: Maybe these should be handled separately as well?  */
 	if (d->cpumodel == 4131) {
 		if (relative_addr < 0x20) {
+			static int bcu_trace_count = 0;
 			/*
 			 *  The ROM programs BCUCNT/ROMSIZE/IO timing via the
 			 *  0x000-0x01f window and later polls offset 0x000 as
@@ -736,6 +737,20 @@ DEVICE_ACCESS(vr41xx)
 				    (uint32_t)relative_addr, (unsigned)len, idata);
 				memcpy(d->bcu_regs + 0x10, readonly_shadow,
 				    sizeof(readonly_shadow));
+			}
+			if (bcu_trace_count < 96 &&
+			    ((uint32_t)relative_addr < 0x18u ||
+			    (uint32_t)cpu->pc == 0x9fc00488u ||
+			    (uint32_t)cpu->pc == 0x9fc0048cu)) {
+				fprintf(stderr,
+				    "[VR41XX_BCU] %c off=0x%03llX len=%zu"
+				    " val=0x%08llX PC=0x%08X\n",
+				    writeflag == MEM_READ ? 'R' : 'W',
+				    (unsigned long long)relative_addr, len,
+				    (unsigned long long)
+				        (writeflag == MEM_READ ? odata : idata),
+				    (uint32_t)cpu->pc);
+				bcu_trace_count++;
 			}
 			goto log_access;
 		}

@@ -34,6 +34,7 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #include "../../config.h"
 
@@ -2066,4 +2067,3 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 
 
 #include "tmp_mips_tail.c"
-
