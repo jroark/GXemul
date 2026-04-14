@@ -56,6 +56,75 @@
 	}
 #endif
 
+#ifndef MIPS_RAISE_BAD_JUMP_TARGET_HELPER_DEFINED
+#define MIPS_RAISE_BAD_JUMP_TARGET_HELPER_DEFINED
+static void mips_raise_bad_jump_target(struct cpu *cpu, MODE_int_t target,
+    MODE_int_t branch_pc)
+{
+	uint64_t vaddr = (uint64_t)(MODE_uint_t)target;
+	uint64_t vaddr_vpn2 = 0;
+	int vaddr_asid = 0;
+	int exc_model;
+	struct mips_coproc *cp0;
+
+	if (!cpu) {
+		return;
+	}
+
+	cp0 = cpu->cd.mips.coproc[0];
+	exc_model = cpu->cd.mips.cpu_type.exc_model;
+
+	if (cp0 != NULL) {
+		if (exc_model == EXC3K) {
+			vaddr_asid = (cp0->reg[COP0_ENTRYHI] &
+			    R2K3K_ENTRYHI_ASID_MASK) >>
+			    R2K3K_ENTRYHI_ASID_SHIFT;
+			vaddr_vpn2 = (vaddr & R2K3K_ENTRYHI_VPN_MASK) >>
+			    R2K3K_ENTRYHI_VPN_SHIFT;
+		} else {
+			vaddr_asid = cp0->reg[COP0_ENTRYHI] & ENTRYHI_ASID;
+			if (cpu->cd.mips.cpu_type.mmu_model == MMU10K) {
+				vaddr_vpn2 = (vaddr &
+				    ENTRYHI_VPN2_MASK_R10K) >>
+				    ENTRYHI_VPN2_SHIFT;
+			} else {
+				vaddr_vpn2 = (vaddr & ENTRYHI_VPN2_MASK) >>
+				    ENTRYHI_VPN2_SHIFT;
+			}
+		}
+	}
+
+	/*
+	 * Real MIPS hardware: an Address Error on instruction fetch raises
+	 * the exception at the new PC (= the misaligned target). EPC is set
+	 * to the faulting fetch address, and Cause.BD is 0 because the
+	 * delay-slot instruction already retired successfully and the fault
+	 * is at the new PC, not inside the branch's delay slot.
+	 *
+	 * WinCE 3.0's general-exception handler depends on this: it inspects
+	 * EPC bits 31..16 == 0xFFFF and EPC bits 1..0 == 0b10 to recognise
+	 * kernel callback trampolines (e.g. coredll dispatching via
+	 * `jalr 0xFFFFF9A2`). If EPC is set to branch_pc instead of vaddr,
+	 * that test fails and the syscall is mis-handled as an unhandled
+	 * fault, breaking coredll DllMain on cold boot.
+	 */
+	cpu->pc = vaddr;
+	cpu->delay_slot = NOT_DELAYED;
+	mips_cpu_exception(cpu, EXCEPTION_ADEL, 0, vaddr, 0,
+	    vaddr_vpn2, vaddr_asid, 0);
+	/*
+	 * Some dyntrans paths keep looking at delay_slot after the exception
+	 * helper returns, so clear it again here.
+	 */
+	cpu->delay_slot = NOT_DELAYED;
+}
+#endif
+
+#define	MIPS_RAISE_BAD_JUMP_TARGET(cpu, target, branch_pc)		\
+	do {								\
+		mips_raise_bad_jump_target((cpu), (target), (branch_pc));	\
+	} while (0)
+
 
 #ifndef	COP0_AVAILABILITY_CHECK_INCLUDED
 #define	COP0_AVAILABILITY_CHECK_INCLUDED
@@ -998,6 +1067,9 @@ X(jr)
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->cd.mips.next_ic = &nothing_call;
 			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+		} else if (rs & 3) {
+			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
+			return;
 		} else {
 			cpu->pc = rs;
 			quick_pc_to_pointers(cpu);
@@ -1018,6 +1090,9 @@ X(jr_ra)
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->cd.mips.next_ic = &nothing_call;
 			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+		} else if (rs & 3) {
+			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
+			return;
 		} else {
 			cpu->pc = rs;
 			quick_pc_to_pointers(cpu);
@@ -1036,6 +1111,9 @@ X(jr_ra_addiu)
 		cpu->pc = rs & ~(MODE_int_t)1;
 		cpu->cd.mips.next_ic = &nothing_call;
 		cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+	} else if (rs & 3) {
+		MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
+		return;
 	} else {
 		cpu->pc = rs;
 		quick_pc_to_pointers(cpu);
@@ -1056,6 +1134,9 @@ X(jr_ra_trace)
 			cpu_functioncall_trace_return(cpu);
 			cpu->cd.mips.next_ic = &nothing_call;
 			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+		} else if (rs & 3) {
+			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
+			return;
 		} else {
 			cpu->pc = rs;
 			cpu_functioncall_trace_return(cpu);
@@ -1081,6 +1162,9 @@ X(jalr)
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu->cd.mips.next_ic = &nothing_call;
 			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+		} else if (rs & 3) {
+			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
+			return;
 		} else {
 			cpu->pc = rs;
 			quick_pc_to_pointers(cpu);
@@ -1106,6 +1190,9 @@ X(jalr_trace)
 			cpu_functioncall_trace(cpu, cpu->pc);
 			cpu->cd.mips.next_ic = &nothing_call;
 			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+		} else if (rs & 3) {
+			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
+			return;
 		} else {
 			cpu->pc = rs;
 			cpu_functioncall_trace(cpu, cpu->pc);
