@@ -6,8 +6,8 @@
  *
  *  1. Redistributions of source code must retain the above copyright
  *     notice, this list of conditions and the following disclaimer.
- *  2. Redistributions in binary form must reproduce the above copyright  
- *     notice, this list of conditions and the following disclaimer in the 
+ *  2. Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer in the
  *     documentation and/or other materials provided with the distribution.
  *  3. The name of the author may not be used to endorse or promote products
  *     derived from this software without specific prior written permission.
@@ -15,7 +15,7 @@
  *  THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
  *  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  *  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- *  ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE   
+ *  ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
  *  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
  *  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
  *  OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
@@ -23,7 +23,7 @@
  *  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  *  OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  *  SUCH DAMAGE.
- *   
+ *
  *
  *  COMMENT: VR41xx (VR4122 and VR4131) misc functions
  *
@@ -51,12 +51,16 @@
 #include "thirdparty/vrkiureg.h"
 #include "thirdparty/vr_rtcreg.h"
 
+#include "hw/rtc.h"
+#include "hw/cmu.h"
+#include "hw/pmu.h"
+
 
 /*  #define debug fatal  */
 
 #define	DEV_VR41XX_TICKSHIFT		14
 
-#define	DEV_VR41XX_LENGTH		0x800	/*  TODO?  */
+#define	DEV_VR41XX_LENGTH		0x800	/*  up to (not including) SIU at 0x800  */
 struct vr41xx_data {
 	struct interrupt cpu_irq;		/*  Connected to MIPS irq 2  */
 	int		cpumodel;		/*  Model nr, e.g. 4121  */
@@ -74,8 +78,14 @@ struct vr41xx_data {
 
 	/*  Timer:  */
 	int		pending_timer_interrupts;
+	int		rtcl1_irq_asserted;
 	struct interrupt timer_irq;
-	struct timer	*timer;
+	struct interrupt rtcl1_irq;
+	uint32_t	rtcl1_divisor;
+	uint64_t	rtcl1_cycle_accum;
+	uint64_t	rtcl1_period_cycles;
+	uint64_t	etime_cycle_accum;
+	uint64_t	etime_period_cycles;
 
 	/*  See icureg.h in NetBSD for more info.  */
 	uint16_t	sysint1;
@@ -84,14 +94,58 @@ struct vr41xx_data {
 	uint16_t	giumask;
 	uint16_t	sysint2;
 	uint16_t	msysint2;
+	uint16_t	giu_regs[16];
 	struct interrupt giu_irq;
+
+	/*  VR4131 RTC (elapsed time counter with read-assist):  */
+	rtc_state_t	rtc;
+	cmu_state_t	cmu;
+	pmu_state_t	pmu;
+	uint8_t		bcu_regs[0x20];
+	uint8_t		dmaau_regs[0x20];
+	uint8_t		dcu_regs[0x20];
+	uint8_t		sdramu_regs[0x10];
 };
 
+/* Public: the DSIU (VR4131 Debug SIU) ns16550 console handle, captured
+ * when the device is registered so the BE-300 machine layer can push
+ * keystrokes into it directly. -1 until set. */
+int dev_vr41xx_dsiu_console_handle = -1;
+
+
+static uint64_t vr41xx_latch_read(const uint8_t *regs, uint32_t off,
+	unsigned len)
+{
+	uint64_t value = 0;
+	unsigned i;
+
+	for (i = 0; i < len; i++)
+		value |= (uint64_t)regs[off + i] << (i * 8);
+
+	return value;
+}
+
+static void vr41xx_latch_write(uint8_t *regs, uint32_t off, unsigned len,
+	uint64_t value)
+{
+	unsigned i;
+
+	for (i = 0; i < len; i++)
+		regs[off + i] = (uint8_t)(value >> (i * 8));
+}
+
+static void vr41xx_seed_latch32(uint8_t *regs, uint32_t off, uint32_t value)
+{
+	regs[off + 0] = (uint8_t)(value & 0xff);
+	regs[off + 1] = (uint8_t)((value >> 8) & 0xff);
+	regs[off + 2] = (uint8_t)((value >> 16) & 0xff);
+	regs[off + 3] = (uint8_t)((value >> 24) & 0xff);
+}
 
 /*
  *  vr41xx_vrip_interrupt_assert():
  *  vr41xx_vrip_interrupt_deassert():
- */ 
+ */
 void vr41xx_vrip_interrupt_assert(struct interrupt *interrupt)
 {
 	struct vr41xx_data *d = (struct vr41xx_data *) interrupt->extra;
@@ -119,7 +173,7 @@ void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
 /*
  *  vr41xx_giu_interrupt_assert():
  *  vr41xx_giu_interrupt_deassert():
- */ 
+ */
 void vr41xx_giu_interrupt_assert(struct interrupt *interrupt)
 {
 	struct vr41xx_data *d = (struct vr41xx_data *) interrupt->extra;
@@ -165,50 +219,6 @@ static void vr41xx_keytick(struct cpu *cpu, struct vr41xx_data *d)
 	 *  one used here.)
 	 *
 	 *  TODO: Make this work with "any" keyboard layout.
-	 *
-	 *  ofs 0:
-	 *	8000='o' 4000='.' 2000=DOWN  1000=UP
-	 *	 800=';'  400='''  200='['    100=?
-	 *	  80='l'   40=CR    20=RIGHT   10=LEFT
-	 *	   8='/'    4='\'    2=']'      1=SPACE
-	 *  ofs 2:
-	 *	8000='a' 4000='s' 2000='d' 1000='f'
-	 *	 800='`'  400='-'  200='='  100=?
-	 *	  80='z'   40='x'   20='c'   10='v'
-	 *	   8=?      4=?      2=?
-	 *  ofs 4:
-	 *	8000='9' 4000='0' 2000=?   1000=?
-	 *	 800='b'  400='n'  200='m'  100=','
-	 *	  80='q'   40='w'   20='e'   10='r'
-	 *	   8='5'    4='6'    2='7'    1='8'
-	 *  ofs 6:
-	 *	8000=ESC 4000=DEL 2000=CAPS 1000=?
-	 *	 800='t'  400='y'  200='u'   100='i'
-	 *	  80='1'   40='2'   20='3'    10='4'
-	 *	   8='g'    4='h'    2='j'     1='k'
-	 *  ofs 8:
-	 *                      200=ALT_L
-	 *	  80=    40=TAB  20='p' 10=BS
-	 *	   8=     4=      2=     1=ALT_R
-	 *  ofs a:
-	 *	800=SHIFT 4=CTRL
-	 *
-	 *
-	 *  The following are for the IBM WorkPad Z50:
-	 *  (Not yet implemented, TODO)
-	 *
-	 *  00    f1      f3      f5      f7      f9      -       -       f11
-	 *  08    f2      f4      f6      f8      f10     -       -       f12
-	 *  10    '       [       -       0       p       ;       up      /
-	 *  18    -       -       -       9       o       l       .       -
-	 *  20    left    ]       =       8       i       k       ,       -
-	 *  28    h       y       6       7       u       j       m       n
-	 *  30    -       bs      num     del     -       \       ent     sp
-	 *  38    g       t       5       4       r       f       v       b
-	 *  40    -       -       -       3       e       d       c       right
-	 *  48    -       -       -       2       w       s       x       down
-	 *  50    esc     tab     ~       1       q       a       z       -
-	 *  58    menu    Ls      Lc      Rc      La      Ra      Rs      -
 	 */
 
 	if (d->d0 != 0 || d->d1 != 0 || d->d2 != 0 ||
@@ -393,19 +403,96 @@ static void vr41xx_keytick(struct cpu *cpu, struct vr41xx_data *d)
 static void timer_tick(struct timer *timer, void *extra)
 {
 	struct vr41xx_data *d = (struct vr41xx_data *) extra;
-	d->pending_timer_interrupts ++;
+	(void)timer;
+
+	/*
+	 * RTCL1 status is write-1-to-clear. While that source bit remains
+	 * set, real hardware should not queue an unbounded stream of fresh
+	 * timer edges on top of the same unacknowledged event. Keep at most
+	 * one pending pulse per latched RTCL1 interrupt and wait for the
+	 * guest to clear RTCINTREG before arming the next tick.
+	 */
+	if (!(d->rtc.rtcint & RTCINT_RTCLONG1_INT)) {
+		d->pending_timer_interrupts ++;
+		d->rtc.rtcint |= RTCINT_RTCLONG1_INT;
+	}
 }
 
 
 DEVICE_TICK(vr41xx)
 {
 	struct vr41xx_data *d = (struct vr41xx_data *) extra;
+	uint64_t emulated_hz;
+	uint64_t tick_cycles;
 
-	if (d->pending_timer_interrupts > 0)
+	emulated_hz = cpu->machine != NULL
+	    ? (uint64_t)cpu->machine->emulated_hz : 0;
+	if (emulated_hz == 0)
+		emulated_hz = 131072000ULL;
+	tick_cycles = (uint64_t)(1U << DEV_VR41XX_TICKSHIFT);
+
+	if (d->etime_period_cycles == 0) {
+		d->etime_period_cycles = emulated_hz /
+		    (uint64_t)ETIME_L_HZ;
+		if (d->etime_period_cycles == 0)
+			d->etime_period_cycles = 1;
+	}
+
+	d->etime_cycle_accum += tick_cycles;
+	while (d->etime_cycle_accum >= d->etime_period_cycles) {
+		d->etime_cycle_accum -= d->etime_period_cycles;
+		rtc_tick(&d->rtc, 1);
+	}
+
+	if (d->rtcl1_divisor != 0 && d->rtcl1_period_cycles != 0) {
+		/*
+		 * Drive RTCL1 from emulated instruction progress rather than
+		 * host wall-clock time. Preserve the existing single-pulse
+		 * latch behavior: once RTCL1 is pending, don't queue more
+		 * pulses until the guest clears RTCINTREG.
+		 */
+		if (!(d->rtc.rtcint & RTCINT_RTCLONG1_INT) &&
+		    d->pending_timer_interrupts == 0) {
+			d->rtcl1_cycle_accum += tick_cycles;
+			while (d->rtcl1_cycle_accum >= d->rtcl1_period_cycles) {
+				d->rtcl1_cycle_accum -= d->rtcl1_period_cycles;
+				timer_tick(NULL, d);
+				if (d->pending_timer_interrupts > 0 ||
+				    (d->rtc.rtcint & RTCINT_RTCLONG1_INT))
+					break;
+			}
+		}
+	}
+
+	/*
+	 * Route RTCL1 through the VR41xx interrupt controller so the guest
+	 * sees the source in SYSINT1 while CPU IP2 is asserted. Keep a
+	 * small backlog when interrupts are masked, but retire one queued
+	 * event as soon as we emit the pulse.
+	 */
+	if (d->pending_timer_interrupts > 1)
+		d->pending_timer_interrupts = 1;
+	if (d->pending_timer_interrupts > 0) {
+		INTERRUPT_ASSERT(d->rtcl1_irq);
+		d->rtcl1_irq_asserted = 1;
+		d->pending_timer_interrupts --;
+	}
+
+	/*
+	 *  ETIME/ECMP compare interrupt — used by Linux 2.6 VR41xx timer
+	 *  and WinCE elapsed time timer.
+	 *  The 2.6 kernel programs ECMP and expects an interrupt when
+	 *  ETIME reaches ECMP.  Only use this path when the RTCL1 timer
+	 *  is not active; the 2.4 kernel creates the
+	 *  RTCL1 timer via offset 0xd0 and the initial etime >> ecmp
+	 *  would cause a spurious interrupt storm.
+	 */
+	if (d->rtcl1_divisor == 0 &&
+	    (d->rtc.rtcint & RTCINT_ELAPSEDTIME_INT))
 		INTERRUPT_ASSERT(d->timer_irq);
 
-	if (cpu->machine->x11_md.in_use)
-		vr41xx_keytick(cpu, d);
+	/*  KIU keyboard tick — disabled (no X11 keyboard input)  */
+	(void)vr41xx_keytick;
 }
 
 
@@ -486,8 +573,6 @@ DEVICE_ACCESS(vr41xx)
 	if (writeflag == MEM_WRITE)
 		idata = memory_readmax64(cpu, data, len);
 
-	// int regnr = relative_addr / sizeof(uint64_t);
-
 	/*  KIU ("Keyboard Interface Unit") is handled separately.  */
 	if (relative_addr >= d->kiu_offset &&
 	    relative_addr < d->kiu_offset + 0x20) {
@@ -497,6 +582,61 @@ DEVICE_ACCESS(vr41xx)
 	}
 
 	/*  TODO: Maybe these should be handled separately as well?  */
+	if (d->cpumodel == 4131) {
+		if (relative_addr < 0x20) {
+			/*
+			 *  The ROM programs BCUCNT/ROMSIZE/IO timing via the
+			 *  0x000-0x01f window and later polls offset 0x000 as
+			 *  a completion flag. Keep that subwindow stateful so
+			 *  the ROM can observe its own writes, but preserve the
+			 *  strap-backed identity/clock bytes at 0x10-0x15.
+			 */
+			if (writeflag == MEM_READ) {
+				odata = vr41xx_latch_read(d->bcu_regs,
+				    (uint32_t)relative_addr, (unsigned)len);
+			} else {
+				uint8_t readonly_shadow[6];
+
+				memcpy(readonly_shadow, d->bcu_regs + 0x10,
+				    sizeof(readonly_shadow));
+				vr41xx_latch_write(d->bcu_regs,
+				    (uint32_t)relative_addr, (unsigned)len, idata);
+				memcpy(d->bcu_regs + 0x10, readonly_shadow,
+				    sizeof(readonly_shadow));
+			}
+			goto ret;
+		}
+		if (relative_addr >= 0x20 && relative_addr < 0x40) {
+			uint32_t off = (uint32_t)(relative_addr - 0x20);
+			if (writeflag == MEM_READ)
+				odata = vr41xx_latch_read(d->dmaau_regs, off,
+				    (unsigned)len);
+			else
+				vr41xx_latch_write(d->dmaau_regs, off,
+				    (unsigned)len, idata);
+			goto ret;
+		}
+		if (relative_addr >= 0x40 && relative_addr < 0x60) {
+			uint32_t off = (uint32_t)(relative_addr - 0x40);
+			if (writeflag == MEM_READ)
+				odata = vr41xx_latch_read(d->dcu_regs, off,
+				    (unsigned)len);
+			else
+				vr41xx_latch_write(d->dcu_regs, off,
+				    (unsigned)len, idata);
+			goto ret;
+		}
+		if (relative_addr >= 0x400 && relative_addr < 0x410) {
+			uint32_t off = (uint32_t)(relative_addr - 0x400);
+			if (writeflag == MEM_READ)
+				odata = vr41xx_latch_read(d->sdramu_regs, off,
+				    (unsigned)len);
+			else
+				vr41xx_latch_write(d->sdramu_regs, off,
+				    (unsigned)len, idata);
+			goto ret;
+		}
+	}
 
 	switch (relative_addr) {
 
@@ -531,6 +671,18 @@ DEVICE_ACCESS(vr41xx)
 	/*  DCU:  0x40 .. 0x5c  */
 
 	/*  CMU:  0x60 .. 0x7c  */
+	case 0x60:
+	case 0x62:
+		if (d->cpumodel == 4131) {
+			uint32_t cmu_off = (uint32_t)(relative_addr - 0x60);
+			if (writeflag == MEM_READ)
+				odata = cmu_read(&d->cmu, cmu_off, (unsigned)len);
+			else
+				cmu_write(&d->cmu, cmu_off, (unsigned)len,
+				    (uint32_t)idata);
+			break;
+		}
+		goto unhandled;
 
 	/*  ICU:  0x80 .. 0xbc  */
 	case 0x80:	/*  Level 1 system interrupt reg 1...  */
@@ -551,8 +703,18 @@ DEVICE_ACCESS(vr41xx)
 	case 0x8c:
 		if (writeflag == MEM_READ)
 			odata = d->msysint1;
-		else
+		else {
+			/*
+			 *  Let the kernel control MSYSINT1 fully.
+			 *  Previously ETIMER (bit 3) was force-enabled
+			 *  for Linux 2.6, but this prevents WinCE from
+			 *  managing its own timer mask — the WinCE
+			 *  interrupt dispatch loop checks SYSINT1 &
+			 *  MSYSINT1 and loops forever if ETIMER is
+			 *  stuck enabled while the timer fires.
+			 */
 			d->msysint1 = idata;
+		}
 		break;
 	case 0x94:
 		if (writeflag == MEM_READ)
@@ -576,10 +738,24 @@ DEVICE_ACCESS(vr41xx)
 			d->msysint2 = idata;
 		break;
 
-	/*  RTC:  */
+	/*  VR4131 PMU lives at 0xc0; older VR41xx chips use this as RTC.  */
 	case 0xc0:
 	case 0xc2:
 	case 0xc4:
+	case 0xc6:
+	case 0xc8:
+	case 0xcc:
+		if (d->cpumodel == 4131) {
+			uint32_t pmu_off = (uint32_t)(relative_addr - 0xc0);
+			if (writeflag == MEM_READ)
+				odata = pmu_read(&d->pmu, pmu_off, (unsigned)len);
+			else
+				pmu_write(&d->pmu, pmu_off, (unsigned)len,
+				    (uint32_t)idata);
+			break;
+		}
+		if (relative_addr > 0xc4)
+			goto unhandled;
 		{
 			struct timeval tv;
 			gettimeofday(&tv, NULL);
@@ -601,40 +777,155 @@ DEVICE_ACCESS(vr41xx)
 		}
 		break;
 
-	case 0xd0:	/*  RTCL1_L_REG_W  */
+	case 0xd0:	/*  RTCL1_L_REG_W (older VR41xx)  */
+	case 0x110:	/*  RTCL1_L_REG_W (VR4131 relocated)  */
 		if (writeflag == MEM_WRITE && idata != 0) {
-			int hz = RTCL1_L_HZ / idata;
-			debug("[ vr41xx: rtc interrupts at %i Hz ]\n", hz);
-			if (d->timer == NULL)
-				d->timer = timer_add(hz, timer_tick, d);
+			uint64_t emulated_hz = cpu->machine != NULL
+			    ? (uint64_t)cpu->machine->emulated_hz : 0;
+
+			if (emulated_hz == 0)
+				emulated_hz = 131072000ULL;
+
+			d->rtcl1_divisor = (uint32_t)idata;
+			d->rtcl1_cycle_accum = 0;
+			d->rtcl1_period_cycles =
+			    (emulated_hz * (uint64_t)d->rtcl1_divisor)
+			    / (uint64_t)RTCL1_L_HZ;
+			if (d->rtcl1_period_cycles == 0)
+				d->rtcl1_period_cycles = 1;
+		}
+		if (d->cpumodel == 4131 && relative_addr == 0x110) {
+			uint32_t rtc_off = (uint32_t)(relative_addr - 0x100);
+
+			if (writeflag == MEM_READ)
+				odata = rtc_read(&d->rtc, rtc_off,
+				    (unsigned)len);
 			else
-				timer_update_frequency(d->timer, hz);
+				rtc_write(&d->rtc, rtc_off, (unsigned)len,
+				    (uint32_t)idata);
 		}
 		break;
-	case 0xd2:	/*  RTCL1_H_REG_W  */
+	case 0xd2:	/*  RTCL1_H_REG_W (older VR41xx)  */
+	case 0x112:	/*  RTCL1_H_REG_W (VR4131 relocated)  */
+		if (d->cpumodel == 4131 && relative_addr == 0x112) {
+			uint32_t rtc_off = (uint32_t)(relative_addr - 0x100);
+
+			if (writeflag == MEM_READ)
+				odata = rtc_read(&d->rtc, rtc_off,
+				    (unsigned)len);
+			else
+				rtc_write(&d->rtc, rtc_off, (unsigned)len,
+				    (uint32_t)idata);
+		}
 		break;
 
-	case 0x108:
-		if (writeflag == MEM_READ)
-			odata = d->giuint;
-		else
-			d->giuint &= ~idata;
-		break;
-	/*  case 0x10a:
-		"High" part of GIU?
-		break;
-	*/
+	/*
+	 *  VR4131 RTC block (offset 0x100-0x13e). On older VR41xx chips,
+	 *  only the ETIME/ECMP subset lives elsewhere; on VR4131 the full
+	 *  RTC/RTC2 window is relocated here.
+	 */
+	case 0x100:	/*  VR4131 ETIMELREG  */
+	case 0x102:	/*  VR4131 ETIMEMREG  */
+	case 0x104:	/*  VR4131 ETIMEHREG  */
+	case 0x108:	/*  VR4131 ECMPLREG / older VR41xx GIUINTREG  */
+	case 0x10a:	/*  VR4131 ECMPMREG  */
+	case 0x10c:	/*  VR4131 ECMPHREG  */
+	case 0x114:	/*  VR4131 RTCL1CNTLREG  */
+	case 0x116:	/*  VR4131 RTCL1CNTHREG  */
+	case 0x118:	/*  VR4131 RTCL2LREG  */
+	case 0x11a:	/*  VR4131 RTCL2HREG  */
+	case 0x11c:	/*  VR4131 RTCL2CNTLREG  */
+	case 0x11e:	/*  VR4131 RTCL2CNTHREG  */
+	case 0x120:	/*  VR4131 TCLKLREG  */
+	case 0x122:	/*  VR4131 TCLKHREG  */
+	case 0x124:	/*  VR4131 TCLKCNTLREG  */
+	case 0x126:	/*  VR4131 TCLKCNTHREG  */
+		if (d->cpumodel == 4131) {
+			uint32_t rtc_off = (uint32_t)(relative_addr - 0x100);
+			if (writeflag == MEM_READ)
+				odata = rtc_read(&d->rtc, rtc_off, (unsigned)len);
+			else
+				rtc_write(&d->rtc, rtc_off, (unsigned)len,
+				    (uint32_t)idata);
+			break;
+		}
+		if (relative_addr == 0x108) {
+			/*  Older VR41xx: GIU interrupt register  */
+			if (writeflag == MEM_READ)
+				odata = d->giuint;
+			else
+				d->giuint &= ~idata;
+			break;
+		}
+		goto unhandled;
 
-	case 0x13e:	/*  on 4181?  */
+	case 0x13e:	/*  on 4181? / VR4131 RTCINTREG  */
 	case 0x1de:	/*  on 4121?  */
 		/*  RTC interrupt register...  */
-		/*  Ack. timer interrupts?  */
-		INTERRUPT_DEASSERT(d->timer_irq);
-		if (d->pending_timer_interrupts > 0)
-			d->pending_timer_interrupts --;
+		/*  Ack. only the timer sources whose RTCINT bits are written. */
+		if (idata & RTCINT_RTCLONG1_INT) {
+			INTERRUPT_DEASSERT(d->rtcl1_irq);
+			d->rtcl1_irq_asserted = 0;
+		}
+		if (idata & RTCINT_ELAPSEDTIME_INT)
+			INTERRUPT_DEASSERT(d->timer_irq);
+		if (d->cpumodel == 4131 && relative_addr == 0x13e)
+			rtc_write(&d->rtc, RTC_RTCINTREG, (unsigned)len,
+			    (uint32_t)idata);
+		break;
+
+	/*
+	 *  VR4131 GIU (GPIO) registers at 0x140-0x15C.
+	 *  GIUPIODL (0x144) returns pin input state — WinCE checks this
+	 *  to determine hardware/power status during OAL init.
+	 */
+	case 0x140:	/*  GIUIOSELL - I/O direction select low  */
+	case 0x142:	/*  GIUIOSELH - I/O direction select high  */
+	case 0x146:	/*  GIUPIODH - Pin I/O data high  */
+	case 0x148:	/*  GIUINTSTATL  */
+	case 0x14a:	/*  GIUINTSTATH  */
+	case 0x14c:	/*  GIUINTENL  */
+	case 0x14e:	/*  GIUINTENH  */
+	case 0x150:	/*  GIUINTTYPL  */
+	case 0x152:	/*  GIUINTTYPH  */
+	case 0x154:	/*  GIUINTALSELL  */
+	case 0x156:	/*  GIUINTALSELH  */
+	case 0x158:	/*  GIUINTHTSELL  */
+	case 0x15a:	/*  GIUINTHTSELH  */
+		/*  Simple latch for most GIU registers  */
+		{
+			int idx = ((int)relative_addr - 0x140) / 2;
+			if (idx >= 0 && idx < 16) {
+				if (writeflag == MEM_WRITE)
+					d->giu_regs[idx] = (uint16_t)idata;
+				else
+					odata = d->giu_regs[idx];
+			}
+		}
+		break;
+	case 0x144:	/*  GIUPIODL - Pin I/O data low  */
+		if (writeflag == MEM_WRITE) {
+			/*  Just latch output bits  */
+		} else {
+			/*
+			 *  Return board strap / GPIO input state.
+			 *
+			 *  The BE-300 does not cold-boot with GIUPIODL at
+			 *  zero on real hardware. BEDiag dumps show
+			 *  0x0F000144 = 0xAAE2 / 0xAAE6, which satisfies
+			 *  the early FUN_80077210 wait on bits 0x0800 and
+			 *  0x0200 while leaving 0x0400 clear.
+			 */
+			if (cpu->machine->machine_subtype ==
+			    MACHINE_HPCMIPS_CASIO_BE300)
+				odata = 0xAAE2;
+			else
+				odata = 0;
+		}
 		break;
 
 	default:
+	unhandled:
 		if (writeflag == MEM_WRITE)
 			debug("[ vr41xx: unimplemented write to address "
 			    "0x%" PRIx64", data=0x%016" PRIx64" ]\n",
@@ -719,12 +1010,23 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 
 	d->cpumodel = cpumodel;
 
+	/*  VR4131 RTC elapsed-time counter (read-assist for SPL polling):  */
+	rtc_init(&d->rtc);
+	cmu_init(&d->cmu);
+	pmu_init(&d->pmu);
+
+	/*
+	 * BCU: only seed read-only hardware values. The ROM programs
+	 * bus timing registers (BCUCNTREG1, ROM/IO speed/size) during
+	 * early init. REVIDREG and CLKSPEEDREG are fixed by silicon
+	 * and pin strapping.
+	 */
+	vr41xx_seed_latch32(d->bcu_regs, 0x10, 0x00005002);  /* REVIDREG */
+	vr41xx_latch_write(d->bcu_regs, 0x14, 2, 0x020c);    /* CLKSPEEDREG */
+
 	/*  TODO: VRC4173 has the KIU at offset 0x100?  */
 	d->kiu_offset = 0x180;
 	d->kiu_console_handle = -1;
-	if (machine->x11_md.in_use)
-		d->kiu_console_handle = console_start_slave_inputonly(
-		    machine, "kiu", 1);
 
 	/*  Connect to the KIU and GIU interrupts:  */
 	snprintf(tmps, sizeof(tmps), "%s.cpu[%i].vrip.%i",
@@ -733,9 +1035,6 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	snprintf(tmps, sizeof(tmps), "%s.cpu[%i].vrip.%i",
 	    machine->path, machine->bootstrap_cpu, VRIP_INTR_KIU);
 	INTERRUPT_CONNECT(tmps, d->kiu_irq);
-
-	if (machine->x11_md.in_use)
-		machine->main_console_handle = d->kiu_console_handle;  
 
 	switch (cpumodel) {
 	case 4101:
@@ -765,6 +1064,14 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 		snprintf(tmps, sizeof(tmps), "%s.cpu[%i].vrip.%i",
 		    machine->path, machine->bootstrap_cpu, VRIP_INTR_ETIMER);
 	INTERRUPT_CONNECT(tmps, d->timer_irq);
+	/*
+	 * RTCL1 is a distinct VRIP source on VR41xx (line 2). Route it
+	 * through its dedicated SYSINT1 bit so the guest sees and clears
+	 * the correct interrupt source in the ICU/RTC registers.
+	 */
+	snprintf(tmps, sizeof(tmps), "%s.cpu[%i].vrip.%i",
+	    machine->path, machine->bootstrap_cpu, VRIP_INTR_RTCL1);
+	INTERRUPT_CONNECT(tmps, d->rtcl1_irq);
 
 	memory_device_register(mem, "vr41xx", baseaddr, DEV_VR41XX_LENGTH,
 	    dev_vr41xx_access, (void *)d, DM_DEFAULT, NULL);
@@ -780,13 +1087,17 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 		    (uint64_t) (baseaddr+0x800));
 		device_add(machine, tmps);
 
-		/*  VR4131 DSIU (Debug SIU) at baseaddr+0x820.
-		 *  NK.exe OAL writes debug serial output here.  */
+		/* VR4131 DSIU (Debug SIU) at baseaddr+0x820.
+		 * NK.exe OAL writes debug serial output here
+		 * (FUN_80078308 polls LSR at +0x05, writes THR
+		 * at +0x00).  The SIU ns16550 window is shrunk
+		 * to 0x20 bytes to avoid collision. */
 		snprintf(tmps, sizeof(tmps), "ns16550 irq=%s.cpu[%i].vrip.%i "
 		    "addr=0x%" PRIx64" in_use=0 name2=dsiu", machine->path,
 		    machine->bootstrap_cpu, VRIP_INTR_DSIU,
 		    (uint64_t) (baseaddr+0x820));
-		device_add(machine, tmps);
+		dev_vr41xx_dsiu_console_handle = (int)(size_t)
+		    device_add(machine, tmps);
 	} else {
 		/*  This is used by Linux and NetBSD:  */
 		snprintf(tmps, sizeof(tmps), "ns16550 irq=%s.cpu[%i]."
@@ -811,4 +1122,3 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 
 	return d;
 }
-
