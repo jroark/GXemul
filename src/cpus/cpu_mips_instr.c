@@ -4403,9 +4403,32 @@ X(to_be_translated)
 				/*  TODO  */
 				goto bad;
 			case COP0_SUSPEND:
-				/*  Used by NetBSD on HPCmips (VR41xx) to
-				    halt the machine.  */
-				ic->f = instr(reboot);
+				/*  VR4131 UM rev 2.00 §4.3.3 (Suspend Mode):
+				    "The processor remains in Suspend mode
+				    until an interrupt is received, at which
+				    time it returns to Fullspeed mode."
+				    On VR41xx, SUSPEND is a wake-on-interrupt
+				    halt, identical in semantics to STANDBY for
+				    CPU-execution purposes.  Reuse instr(wait).
+				    NetBSD/HPCmips happens to use SUSPEND as a
+				    machine-halt entry point, but only because
+				    its halt path leaves no interrupt source
+				    armed; that is not the instruction's real
+				    semantic.  */
+				ic->f = instr(wait);
+				if (cpu->cd.mips.cpu_type.rev != MIPS_R4100) {
+					static int warned = 0;
+					ic->f = instr(reserved);
+					if (!warned &&
+					    !cpu->translation_readahead) {
+						fatal("{ WARNING: Attempt to "
+						    "execute a R41xx SUSPEND "
+						    "instruction, but the "
+						    "emulated CPU doesn't "
+						    "support it! }\n");
+						warned = 1;
+					}
+				}
 				break;
 			case COP0_EI:
 				if (cpu->cd.mips.cpu_type.rev == MIPS_R5900) {
