@@ -48,8 +48,14 @@ static bool use_colorized_output()
 	static bool isatty_initialized = false;
 	static bool r = false;
 
+	/*
+	 * Color escape codes emitted by debug/fatal/disassembly go to
+	 * stderr (see debugmsg.c); gate on STDERR_FILENO so a run with
+	 * stdout redirected to a log file but stderr still on a terminal
+	 * still gets colorized diagnostics.
+	 */
 	if (!isatty_initialized) {
-		r = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+		r = isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
 		isatty_initialized = true;
 	}
 
@@ -67,7 +73,7 @@ void color_prompt()
 void color_normal()
 {
 	if (use_colorized_output())
-		printf("%s", color_normal_ptr());
+		fprintf(stderr, "%s", color_normal_ptr());
 }
 
 void color_error(bool bold)
@@ -76,23 +82,23 @@ void color_error(bool bold)
 		return;
 
 	if (bold)
-		printf("\e[31;1m");
+		fprintf(stderr, "\e[31;1m");
 	else
-		printf("\e[31m");
+		fprintf(stderr, "\e[31m");
 }
 
 
 void color_debugmsg_subsystem()
 {
 	if (use_colorized_output())
-		printf("\e[33m");
+		fprintf(stderr, "\e[33m");
 }
 
 
 void color_debugmsg_name()
 {
 	if (use_colorized_output())
-		printf("\e[34;1m");
+		fprintf(stderr, "\e[34;1m");
 }
 
 
@@ -108,7 +114,7 @@ void color_pc_indicator()
 	if (!use_colorized_output())
 		return;
 
-	printf("\e[31m");
+	fprintf(stderr, "\e[31m");
 }
 
 
