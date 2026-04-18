@@ -406,16 +406,16 @@ static void timer_tick(struct timer *timer, void *extra)
 	(void)timer;
 
 	/*
-	 * RTCL1 status is write-1-to-clear. While that source bit remains
-	 * set, real hardware should not queue an unbounded stream of fresh
-	 * timer edges on top of the same unacknowledged event. Keep at most
-	 * one pending pulse per latched RTCL1 interrupt and wait for the
-	 * guest to clear RTCINTREG before arming the next tick.
+	 * Each RTCL1 underflow latches the source bit in RTCINTREG and
+	 * generates an interrupt edge into the ICU. SYSINT1 (the per-source
+	 * ICU latch) coalesces repeated edges naturally; the queue cap
+	 * (pending_timer_interrupts capped at 1 in the device tick) prevents
+	 * an unbounded backlog. Do NOT gate on RTCINTREG bits here, because
+	 * WinCE NK does not write RTCINTREG to ack — it acks the source via
+	 * SYSINT1 write-1-to-clear, then re-enables the bit in MSYSINT1.
 	 */
-	if (!(d->rtc.rtcint & RTCINT_RTCLONG1_INT)) {
-		d->pending_timer_interrupts ++;
-		d->rtc.rtcint |= RTCINT_RTCLONG1_INT;
-	}
+	d->pending_timer_interrupts ++;
+	d->rtc.rtcint |= RTCINT_RTCLONG1_INT;
 }
 
 
@@ -446,21 +446,23 @@ DEVICE_TICK(vr41xx)
 
 	if (d->rtcl1_divisor != 0 && d->rtcl1_period_cycles != 0) {
 		/*
-		 * Drive RTCL1 from emulated instruction progress rather than
-		 * host wall-clock time. Preserve the existing single-pulse
-		 * latch behavior: once RTCL1 is pending, don't queue more
-		 * pulses until the guest clears RTCINTREG.
+		 * Drive RTCL1 from emulated instruction progress. Each
+		 * underflow of the divisor produces an interrupt edge.
+		 *
+		 * Backlog handling: pending_timer_interrupts is capped at 1
+		 * below, and the SYSINT1 latch already coalesces repeated
+		 * edges (if NK hasn't acked the previous one, the bit just
+		 * stays set). Do NOT additionally gate on RTCINTREG bits —
+		 * WinCE NK acks RTCL1 by writing SYSINT1 (write-1-to-clear),
+		 * not by writing RTCINTREG, so gating on rtcint locks the
+		 * timer up after the first fire.
 		 */
-		if (!(d->rtc.rtcint & RTCINT_RTCLONG1_INT) &&
-		    d->pending_timer_interrupts == 0) {
-			d->rtcl1_cycle_accum += tick_cycles;
-			while (d->rtcl1_cycle_accum >= d->rtcl1_period_cycles) {
-				d->rtcl1_cycle_accum -= d->rtcl1_period_cycles;
-				timer_tick(NULL, d);
-				if (d->pending_timer_interrupts > 0 ||
-				    (d->rtc.rtcint & RTCINT_RTCLONG1_INT))
-					break;
-			}
+		d->rtcl1_cycle_accum += tick_cycles;
+		while (d->rtcl1_cycle_accum >= d->rtcl1_period_cycles) {
+			d->rtcl1_cycle_accum -= d->rtcl1_period_cycles;
+			timer_tick(NULL, d);
+			if (d->pending_timer_interrupts > 0)
+				break;
 		}
 	}
 
@@ -469,9 +471,24 @@ DEVICE_TICK(vr41xx)
 	 * sees the source in SYSINT1 while CPU IP2 is asserted. Keep a
 	 * small backlog when interrupts are masked, but retire one queued
 	 * event as soon as we emit the pulse.
+	 *
+	 * RTCL1 is modeled as an edge pulse: assert this tick, deassert on
+	 * the next. WinCE NK does NOT write RTCINTREG to ack RTCL1 (the
+	 * OAL idle path uses RTCL1 only as a wake source for the SUSPEND
+	 * idle loop and skips bit 2 of SYSINT1 in its dispatcher). A
+	 * level-held IRQ would re-fire EXCEPTION_INT every dyntrans batch
+	 * because NK never deasserts the source. The pulse model matches
+	 * the observed behavior on real hardware where each underflow
+	 * generates a brief interrupt edge that NK observes via SUSPEND
+	 * wake without explicit acknowledge.
 	 */
 	if (d->pending_timer_interrupts > 1)
 		d->pending_timer_interrupts = 1;
+	if (d->rtcl1_irq_asserted && d->pending_timer_interrupts == 0) {
+		INTERRUPT_DEASSERT(d->rtcl1_irq);
+		d->rtcl1_irq_asserted = 0;
+		d->rtc.rtcint &= ~RTCINT_RTCLONG1_INT;
+	}
 	if (d->pending_timer_interrupts > 0) {
 		INTERRUPT_ASSERT(d->rtcl1_irq);
 		d->rtcl1_irq_asserted = 1;
