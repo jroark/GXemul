@@ -42,6 +42,7 @@ struct machine_pmax;
 struct memory;
 struct of_data;
 struct settings;
+struct vfb_data;
 
 
 /*  TODO: This should probably go away...  */
@@ -122,6 +123,9 @@ struct machine {
 
 	/*  Main memory:  */
 	struct memory *memory;
+
+	/*  Framebuffer backing buffer (from dev_fb_init)  */
+	struct vfb_data *fb;
 
 	int	main_console_handle;
 

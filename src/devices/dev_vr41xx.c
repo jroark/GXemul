@@ -775,9 +775,17 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	 */
 	if (cpumodel == 4131) {
 		snprintf(tmps, sizeof(tmps), "ns16550 irq=%s.cpu[%i].vrip.%i "
-		    "addr=0x%" PRIx64" name2=siu", machine->path,
+		    "addr=0x%" PRIx64" in_use=0 name2=siu", machine->path,
 		    machine->bootstrap_cpu, VRIP_INTR_SIU,
 		    (uint64_t) (baseaddr+0x800));
+		device_add(machine, tmps);
+
+		/*  VR4131 DSIU (Debug SIU) at baseaddr+0x820.
+		 *  NK.exe OAL writes debug serial output here.  */
+		snprintf(tmps, sizeof(tmps), "ns16550 irq=%s.cpu[%i].vrip.%i "
+		    "addr=0x%" PRIx64" in_use=0 name2=dsiu", machine->path,
+		    machine->bootstrap_cpu, VRIP_INTR_DSIU,
+		    (uint64_t) (baseaddr+0x820));
 		device_add(machine, tmps);
 	} else {
 		/*  This is used by Linux and NetBSD:  */

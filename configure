@@ -200,7 +200,7 @@ CPU_TOOLS="$CPU_TOOLS generate_m88k_loadstore"
 
 #  MIPS
 printf " add_cpu_family(mips_cpu_family_init, ARCH_MIPS);" >> config.h
-CPU_ARCHS="$CPU_ARCHS cpu_mips.o cpu_mips_coproc.o "
+CPU_ARCHS="$CPU_ARCHS cpu_mips.o cpu_mips_coproc.o cpu_mips16.o "
 CPU_ARCHS="$CPU_ARCHS cpu_mips_instr_unaligned.o"
 CPU_TOOLS="$CPU_TOOLS generate_mips_loadstore"
 CPU_TOOLS="$CPU_TOOLS generate_mips_loadstore_multi"

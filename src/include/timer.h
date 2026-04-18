@@ -35,8 +35,12 @@ struct timer;
 struct timer *timer_add(double freq, void (*timer_tick)(struct timer *timer,
 	void *extra), void *extra);
 void timer_remove(struct timer *t);
+void timer_remove_all(void);
 
 void timer_update_frequency(struct timer *t, double new_freq);
+
+void timer_reset_state(void);
+void timer_tick_manual(void);
 
 void timer_start(void);
 void timer_stop(void);

@@ -698,6 +698,11 @@ int mips_cpu_disassemble_instr(struct cpu *cpu, unsigned char *originstr,
 	if (running)
 		dumpaddr = cpu->pc;
 
+	/*  MIPS16 mode: dispatch to the MIPS16 disassembler  */
+	if (running && cpu->cd.mips.mips16)
+		return mips_cpu_disassemble_instr_mips16(cpu, originstr,
+		    running, dumpaddr);
+
 	if ((dumpaddr & 3) != 0)
 		printf("WARNING: Unaligned address!\n");
 
@@ -1934,7 +1939,14 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 			reg[COP0_EPC] = cpu->pc;
 			reg[COP0_CAUSE] &= ~CAUSE_BD;
 		}
+
+		/*  MIPS16: preserve ISA mode in EPC bit 0  */
+		if (cpu->cd.mips.mips16)
+			reg[COP0_EPC] |= 1;
 	}
+
+	/*  Exceptions always execute in MIPS32 mode  */
+	cpu->cd.mips.mips16 = 0;
 
 	if (cpu->delay_slot)
 		cpu->delay_slot = EXCEPTION_IN_DELAY_SLOT;

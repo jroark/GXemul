@@ -93,6 +93,7 @@ struct interrupt {
  */
 
 void interrupt_handler_register(struct interrupt *templ);
+void interrupt_handler_clear_all(void);
 void interrupt_handler_remove(const char *name);
 int interrupt_handler_lookup(const char *name, struct interrupt *templ);
 

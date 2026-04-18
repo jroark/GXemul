@@ -104,6 +104,8 @@ static int console_mouse_fb_nr;		/*  framebuffer number of
 static int console_mouse_buttons;	/*  left=4, middle=2, right=1  */
 
 static int allow_slaves = 0;
+static int console_stdin_eof = 0;
+static int console_is_tty = 0;
 
 struct console_handle {
 	int		in_use;
@@ -143,7 +145,8 @@ void console_deinit_main(void)
 	if (!console_initialized)
 		return;
 
-	tcsetattr(STDIN_FILENO, TCSANOW, &console_oldtermios);
+	if (console_is_tty)
+		tcsetattr(STDIN_FILENO, TCSANOW, &console_oldtermios);
 
 	console_initialized = 0;
 }
@@ -160,7 +163,7 @@ void console_deinit_main(void)
  */
 void console_sigcont(int x)
 {
-	if (!console_initialized)
+	if (!console_initialized || !console_is_tty)
 		return;
 
 	/*  Make sure that the correct (current) termios setting is active:  */
@@ -280,17 +283,22 @@ static int d_avail(int d)
 {
 	fd_set rfds;
 	struct timeval tv;
-
-	FD_ZERO(&rfds);
-	FD_SET(d, &rfds);
-	tv.tv_sec = 0;
-	tv.tv_usec = 0;
+	int retries = 0;
 
 	for (;;) {
-		// Select may return -1 if interrupted.
+		FD_ZERO(&rfds);
+		FD_SET(d, &rfds);
+		tv.tv_sec = 0;
+		tv.tv_usec = 0;
+
 		int r = select(d+1, &rfds, NULL, NULL, &tv);
 		if (r >= 0)
 			return r;
+
+		/* Retry on EINTR, but give up on other errors or
+		   after too many retries.  */
+		if (errno != EINTR || ++retries > 3)
+			return 0;
 	}
 }
 
@@ -325,8 +333,11 @@ static int console_stdin_avail(int handle)
 	if (!console_handles[handle].in_use_for_input)
 		return 0;
 
-	if (!allow_slaves)
+	if (!allow_slaves) {
+		if (console_stdin_eof)
+			return 0;
 		return d_avail(STDIN_FILENO);
+	}
 
 	if (console_handles[handle].using_xterm ==
 	    USING_XTERM_BUT_NOT_YET_OPEN)
@@ -371,6 +382,13 @@ int console_charavail(int handle)
 			d = console_handles[handle].r_descriptor;
 
 		len = read(d, ch, sizeof(ch));
+
+		if (len <= 0) {
+			/* EOF or error: stop polling this descriptor. */
+			if (!allow_slaves)
+				console_stdin_eof = 1;
+			break;
+		}
 
 		for (i=0; i<len; i++) {
 			/*  printf("[ %i: %i ]\n", i, ch[i]);  */
@@ -845,33 +863,42 @@ void console_init_main(struct emul *emul)
 	if (console_initialized)
 		return;
 
-	tcgetattr(STDIN_FILENO, &console_oldtermios);
-	memcpy(&console_curtermios, &console_oldtermios,
-	    sizeof (struct termios));
+	console_is_tty = isatty(STDIN_FILENO);
 
-	console_curtermios.c_lflag &= ~ICANON;
-	console_curtermios.c_cc[VTIME] = 0;
-	console_curtermios.c_cc[VMIN] = 1;
+	if (console_is_tty) {
+		tcgetattr(STDIN_FILENO, &console_oldtermios);
+		memcpy(&console_curtermios, &console_oldtermios,
+		    sizeof (struct termios));
 
-	console_curtermios.c_lflag &= ~ECHO;
+		console_curtermios.c_lflag &= ~ICANON;
+		console_curtermios.c_cc[VTIME] = 0;
+		console_curtermios.c_cc[VMIN] = 1;
 
-	/*
-	 *  Most guest OSes seem to work ok without ~ICRNL, but Linux on
-	 *  DECstation requires it to be usable.  Unfortunately, clearing
-	 *  out ICRNL makes tracing with '-t ... |more' akward, as you
-	 *  might need to use CTRL-J instead of the enter key.  Hence,
-	 *  this bit is only cleared if we're not tracing:
-	 */
-	tra = 0;
-	for (i=0; i<emul->n_machines; i++)
-		if (emul->machines[i]->show_trace_tree ||
-		    emul->machines[i]->instruction_trace ||
-		    emul->machines[i]->register_dump)
-			tra = 1;
-	if (!tra)
-		console_curtermios.c_iflag &= ~ICRNL;
+		console_curtermios.c_lflag &= ~ECHO;
 
-	tcsetattr(STDIN_FILENO, TCSANOW, &console_curtermios);
+		/*
+		 *  Most guest OSes seem to work ok without ~ICRNL, but
+		 *  Linux on DECstation requires it to be usable.
+		 *  Unfortunately, clearing out ICRNL makes tracing with
+		 *  '-t ... |more' akward, as you might need to use
+		 *  CTRL-J instead of the enter key.  Hence, this bit is
+		 *  only cleared if we're not tracing:
+		 */
+		tra = 0;
+		for (i=0; i<emul->n_machines; i++)
+			if (emul->machines[i]->show_trace_tree ||
+			    emul->machines[i]->instruction_trace ||
+			    emul->machines[i]->register_dump)
+				tra = 1;
+		if (!tra)
+			console_curtermios.c_iflag &= ~ICRNL;
+
+		tcsetattr(STDIN_FILENO, TCSANOW, &console_curtermios);
+	}
+
+	/*  Force line-buffered stdout when redirected to a file.  */
+	if (!isatty(STDOUT_FILENO))
+		setvbuf(stdout, NULL, _IOLBF, 0);
 
 	console_stdout_pending = 1;
 	console_handles[MAIN_CONSOLE].fifo_head = 0;

@@ -125,6 +125,24 @@ void timer_remove(struct timer *t)
 
 
 /*
+ *  timer_remove_all():
+ *
+ *  Remove and free all timers. Used before re-initializing the machine so
+ *  that stale timer callbacks from the previous run do not fire.
+ */
+void timer_remove_all(void)
+{
+	struct timer *t = first_timer;
+	while (t != NULL) {
+		struct timer *next = t->next;
+		free(t);
+		t = next;
+	}
+	first_timer = NULL;
+}
+
+
+/*
  *  timer_update_frequency():
  *
  *  Changes the frequency of an existing timer.
@@ -195,6 +213,38 @@ static void timer_tick(int signal_nr)
 #ifdef TEST
 	printf("T"); fflush(stdout);
 #endif
+}
+
+
+/*
+ *  timer_reset_state():
+ *
+ *  Reset timer framework state without starting the signal-driven tick.
+ */
+void timer_reset_state(void)
+{
+	struct timer *timer = first_timer;
+
+	gettimeofday(&timer_start_tv, NULL);
+	timer_current_time = 0.0;
+	timer_countdown_to_next_gettimeofday = 0;
+
+	while (timer != NULL) {
+		timer->next_tick_at = timer->interval;
+		timer = timer->next;
+	}
+}
+
+
+/*
+ *  timer_tick_manual():
+ *
+ *  Manually run one tick of the timer framework. Used by callers that
+ *  drive time without the SIGALRM-based tick (e.g. web/batch runs).
+ */
+void timer_tick_manual(void)
+{
+	timer_tick(0);
 }
 
 

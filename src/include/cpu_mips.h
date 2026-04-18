@@ -228,6 +228,11 @@ struct mips_cpu {
 	struct interrupt irq_compare;
 	struct timer	*timer;
 
+	/*  MIPS16 compact encoding mode:  */
+	int		mips16;		/*  1 = currently in MIPS16 mode  */
+	uint64_t	m16_delay_target;  /*  JAL/JALX target (pending delay slot)  */
+	int		m16_delay_jalx;    /*  1 = pending JALX (switch to MIPS32)  */
+
 	/*  Read-Modify-Write (LL/SC):  */
 	int		rmw;		/*  1 = currently active  */
 	uint64_t	rmw_len;	/*  Length of rmw modification  */
@@ -293,6 +298,9 @@ void mips_cpu_register_match(struct machine *m, char *name,
 void mips_cpu_register_dump(struct cpu *cpu, int gprs, int coprocs);
 int mips_cpu_disassemble_instr(struct cpu *cpu, unsigned char *instr,
         int running, uint64_t addr);
+int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu);
+int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
+        int running, uint64_t dumpaddr);
 void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
         /*  uint64_t pagemask,  */  int coproc_nr, uint64_t vaddr_vpn2,
         int vaddr_asid, int x_64);

@@ -70,23 +70,27 @@ MACHINE_SETUP(hpcmips)
 	switch (machine->machine_subtype) {
 
 	case MACHINE_HPCMIPS_CASIO_BE300:
-		/*  166MHz VR4131  */
+		/*  166MHz VR4131, PClock = 131.072 MHz  */
 		machine->machine_name = strdup("Casio Cassiopeia BE-300");
+		machine->emulated_hz = 131072000;
 		hpc_fb_addr = 0x0a200000;
 		hpc_fb_xsize = 240;
 		hpc_fb_ysize = 320;
 		hpc_fb_xsize_mem = 256;
-		hpc_fb_ysize_mem = 320;
-		hpc_fb_bits = 15;
+		hpc_fb_ysize_mem = 324;  /* +4: SPL rect-fill writes row 320 */
+		hpc_fb_bits = 16;
 		hpc_fb_encoding = BIFB_D16_0000;
 
-		/*  TODO: irq?  */
-		snprintf(tmpstr, sizeof(tmpstr), "ns16550 irq=0 addr=0x"
-		    "0a008680 addr_mult=4 in_use=%i", !machine->x11_md.in_use);
+		dev_vr41xx_init(machine, machine->memory, 4131);
+
+		/*  VRC4173 companion chip SIU  */
+		snprintf(tmpstr, sizeof(tmpstr), "ns16550 irq=%s.cpu[%i]"
+		    ".vrip.%i addr=0x0a008680 addr_mult=4 in_use=%i"
+		    " name2=vrc4173siu",
+		    machine->path, machine->bootstrap_cpu,
+		    VRIP_INTR_SIU, 1);
 		machine->main_console_handle = (size_t)
 		    device_add(machine, tmpstr);
-
-		dev_vr41xx_init(machine, machine->memory, 4131);
 
 		hpc_platid_cpu_arch = 1;	/*  MIPS  */
 		hpc_platid_cpu_series = 1;	/*  VR  */
@@ -296,7 +300,8 @@ MACHINE_SETUP(hpcmips)
 	    + (hpc_platid_model <<  8) + hpc_platid_submodel);
 
 	if (hpc_fb_addr != 0) {
-		dev_fb_init(machine, machine->memory, hpc_fb_addr, VFB_HPC,
+		machine->fb = dev_fb_init(machine, machine->memory,
+		    hpc_fb_addr, VFB_HPC,
 		    hpc_fb_xsize, hpc_fb_ysize,
 		    hpc_fb_xsize_mem, hpc_fb_ysize_mem,
 		    hpc_fb_bits, machine->machine_name);
@@ -305,6 +310,17 @@ MACHINE_SETUP(hpcmips)
 		    address 0x8.......:  */
 		dev_ram_init(machine, 0x80000000, 0x20000000,
 		    DEV_RAM_MIRROR | DEV_RAM_MIGHT_POINT_TO_DEVICES, 0x0, NULL);
+
+		/*  BE-300: The VR4131 bus maps PA by 29 bits. kseg1 VA
+		    0xAA200000 when used with remap_page_range leaks bit 29
+		    into the PA (PA 0x2A200000). Mirror the low 512MB.  */
+		dev_ram_init(machine, 0x20000000, 0x20000000,
+		    DEV_RAM_MIRROR | DEV_RAM_MIGHT_POINT_TO_DEVICES, 0x0, NULL);
+
+		/*  BE-300 ROM MIPS16 boot dispatcher uses stack at PA
+		    0x09100000 (VA 0xA9100000 kseg1).  Map 8KB of RAM there.  */
+		dev_ram_init(machine, 0x09100000, 0x2000,
+		    DEV_RAM_RAM, 0, NULL);
 	}
 
 	if (!machine->prom_emulation)
