@@ -56,6 +56,8 @@
 #include "hw/cmu.h"
 #include "hw/pmu.h"
 
+#include "cpu_mips.h"	/* mips_cpu_cold_reset() */
+
 
 /*  #define debug fatal  */
 
@@ -487,6 +489,15 @@ DEVICE_TICK(vr41xx)
 		if (count_delta > (uint32_t)(1U << DEV_VR41XX_TICKSHIFT) * 4)
 			count_delta = (uint32_t)(1U << DEV_VR41XX_TICKSHIFT);
 		tick_cycles = count_delta;
+
+		/*
+		 * Pet / fire the PMU HALTimer watchdog (UM §12.2.2). Mask
+		 * to 32 bits because COP0_COUNT is stored sign-extended
+		 * (cpu_dyntrans.c:469 uses `(int32_t)(old + n_instrs)`),
+		 * so feeding the raw uint64_t drives the PMU delta math
+		 * negative across the 0x80000000 boundary.
+		 */
+		pmu_tick(&d->pmu, (uint64_t) cur_count);
 	}
 
 	if (d->etime_period_cycles == 0) {
@@ -820,11 +831,27 @@ DEVICE_ACCESS(vr41xx)
 	case 0xcc:
 		if (d->cpumodel == 4131) {
 			uint32_t pmu_off = (uint32_t)(relative_addr - 0xc0);
-			if (writeflag == MEM_READ)
+			if (writeflag == MEM_READ) {
 				odata = pmu_read(&d->pmu, pmu_off, (unsigned)len);
-			else
+			} else {
 				pmu_write(&d->pmu, pmu_off, (unsigned)len,
 				    (uint32_t)idata);
+				/*
+				 * SOFTRST dispatch: pmu_write staged the
+				 * RSTSW cause bit and set softrst_pending;
+				 * we supply cur_count (pmu.c has no cpu
+				 * handle) and drive the cold-reset thunk.
+				 */
+				if (d->pmu.softrst_pending) {
+					uint64_t cur_count = (uint32_t)
+					    cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
+					d->pmu.softrst_pending = 0;
+					pmu_apply_pending_reset_state(&d->pmu,
+					    cur_count);
+					if (d->pmu.cold_reset != NULL)
+						d->pmu.cold_reset(d->pmu.cpu_opaque);
+				}
+			}
 			break;
 		}
 		if (relative_addr > 0xc4)
@@ -1029,6 +1056,19 @@ ret:
 
 
 /*
+ *  vr41xx_issue_cold_reset_thunk():
+ *
+ *  Bridge between pmu.c (CPU-free) and the gxemul CPU layer. Stored
+ *  in pmu_state_t::cold_reset by pmu_arm_initial() and invoked on
+ *  HALTimer expiry or PMUCNT2REG SOFTRST write.
+ */
+static void vr41xx_issue_cold_reset_thunk(void *opaque)
+{
+	mips_cpu_cold_reset((struct cpu *)opaque);
+}
+
+
+/*
  *  dev_vr41xx_init():
  *
  *  machine->path is something like "machine[0]".
@@ -1101,6 +1141,28 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	rtc_init(&d->rtc);
 	cmu_init(&d->cmu);
 	pmu_init(&d->pmu);
+
+	/*
+	 * Arm the HALTimer (VR4131 UM §12.2.2): ~4 s window after RTCRST
+	 * that must be petted via PMUCNTREG bit 2 or the CPU is cold-reset
+	 * with SDRAM preserved.
+	 *
+	 * Count rate: gxemul's dyntrans increments COP0_COUNT by n_instrs
+	 * per batch (cpu_dyntrans.c:469), so in-emulator Count advances at
+	 * ~emulated_hz, not CPU/2. The hz/2 cadence fix in
+	 * cpu_mips_coproc.c only affects the Compare wall-clock timer, not
+	 * Count itself. Using emulated_hz * 4 here gives ~4 seconds of
+	 * emulated time on the same clock basis as all other Count-driven
+	 * timers in this tree.
+	 */
+	if (cpumodel == 4131) {
+		struct cpu *c0 = machine->cpus[machine->bootstrap_cpu];
+		uint64_t cur_count = (uint32_t)
+		    c0->cd.mips.coproc[0]->reg[COP0_COUNT];
+		uint64_t arm_cycles = (uint64_t)machine->emulated_hz * 4;
+		pmu_arm_initial(&d->pmu, cur_count, arm_cycles,
+		    vr41xx_issue_cold_reset_thunk, c0);
+	}
 
 	/*
 	 * BCU: only seed read-only hardware values. The ROM programs
