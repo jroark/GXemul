@@ -375,6 +375,20 @@ int mips_run_instr(struct cpu *cpu);
 void mips_update_translation_table(struct cpu *cpu, uint64_t vaddr_page,
 	unsigned char *host_page, int writeflag, uint64_t paddr_page);
 void mips_invalidate_translation_caches(struct cpu *cpu, uint64_t, int);
+
+/*
+ *  Cold reset, matching VR4131 UM §6.3.1: resets CP0 (except COUNT/COMPARE),
+ *  MIPS16 / LL-SC / delay-slot state, and dyntrans translation cache, then
+ *  jumps PC to 0xBFC00000. Does not touch guest memory, so SDRAM / PMU /
+ *  RTC peripheral state survive (UM §12.1.1 / §12.1.2).
+ */
+void mips_cpu_cold_reset(struct cpu *cpu);
+
+/*
+ *  Re-initialize COP0 CONFIG register and cop0_config_select1 to their
+ *  post-reset values (also used by mips_coproc_new during initial bring-up).
+ */
+void initialize_cop0_config(struct cpu *cpu, struct mips_coproc *c);
 void mips_invalidate_code_translation(struct cpu *cpu, uint64_t, int);
 int mips32_run_instr(struct cpu *cpu);
 void mips32_update_translation_table(struct cpu *cpu, uint64_t vaddr_page,

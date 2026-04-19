@@ -55,7 +55,7 @@ static const char *regnames[] = MIPS_REGISTER_NAMES;
  *
  *  Helper function, called from mips_coproc_new().
  */
-static void initialize_cop0_config(struct cpu *cpu, struct mips_coproc *c)
+void initialize_cop0_config(struct cpu *cpu, struct mips_coproc *c)
 {
 	const int m16 = 0;	/*  TODO: MIPS16 support  */
 	int IB, DB, SB, IC, DC, SC, IA, DA;

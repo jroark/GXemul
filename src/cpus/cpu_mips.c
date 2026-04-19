@@ -46,6 +46,7 @@
 #include "emul.h"
 #include "machine.h"
 #include "memory.h"
+#include "be300_probe.h"
 #include "mips_cpu_types.h"
 
 /*
@@ -324,6 +325,71 @@ int mips_cpu_new(struct cpu *cpu, struct memory *mem, struct machine *machine,
 		    cpu->cd.mips.coproc[0]->reg[i]);
 
 	return 1;
+}
+
+
+/*
+ *  mips_cpu_cold_reset():
+ *
+ *  VR4131 cold-reset path per UM §6.3.1 and §12.1. Resets CPU execution
+ *  state (CP0, MIPS16, LL/SC, delay slot, dyntrans translation cache) and
+ *  jumps PC to the ROM reset vector (0xBFC00000). Does not touch guest
+ *  memory, so SDRAM and peripheral state survive (matching real-HW
+ *  "HALTimer / RSTSW / SOFTRST leaves SDRAM intact" behaviour).
+ *
+ *  COUNT and COMPARE are preserved across the reset per UM §6.3.1 so that
+ *  the PMU HALTimer countdown (which samples CP0 Count in a delta loop)
+ *  stays consistent with guest-visible time.
+ */
+void mips_cpu_cold_reset(struct cpu *cpu)
+{
+	struct mips_coproc *cp0 = cpu->cd.mips.coproc[0];
+	uint64_t saved_count, saved_compare;
+	int i;
+
+	saved_count   = cp0->reg[COP0_COUNT];
+	saved_compare = cp0->reg[COP0_COMPARE];
+
+	for (i = 0; i < N_MIPS_COPROC_REGS; i++)
+		cp0->reg[i] = 0;
+
+	cp0->reg[COP0_STATUS] = STATUS_BEV | STATUS_ERL;
+	cp0->reg[COP0_STATUS] = (int32_t) cp0->reg[COP0_STATUS];
+
+	cp0->reg[COP0_PAGEMASK] = 0x1fff;
+
+	cp0->reg[COP0_PRID] =
+	      (0x00 << 24)
+	    | (0x00 << 16)
+	    | (cpu->cd.mips.cpu_type.rev << 8)
+	    |  cpu->cd.mips.cpu_type.sub;
+
+	cp0->reg[COP0_WIRED]  = 0;
+	cp0->reg[COP0_RANDOM] = cp0->nr_of_tlbs - 1;
+
+	initialize_cop0_config(cpu, cp0);
+
+	cp0->reg[COP0_COUNT]   = saved_count;
+	cp0->reg[COP0_COMPARE] = saved_compare;
+
+	cpu->cd.mips.mips16                     = 0;
+	cpu->cd.mips.m16_delay_target           = 0;
+	cpu->cd.mips.m16_delay_jalx             = 0;
+	cpu->cd.mips.rmw                        = 0;
+	cpu->cd.mips.rmw_len                    = 0;
+	cpu->cd.mips.rmw_addr                   = 0;
+	cpu->cd.mips.compare_interrupts_pending = 0;
+
+	cpu->delay_slot            = NOT_DELAYED;
+	cpu->translation_readahead = 0;
+
+	if (cpu->invalidate_translation_caches != NULL)
+		cpu->invalidate_translation_caches(cpu, 0, INVALIDATE_ALL);
+
+	cpu->pc = (int64_t)(int32_t) 0xbfc00000;
+
+	debugmsg(SUBSYS_CPU, "cpu", VERBOSITY_DEBUG,
+	    "cold reset -> PC=0xBFC00000 (SDRAM and peripherals preserved)");
 }
 
 
