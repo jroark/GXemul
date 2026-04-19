@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include "console.h"
+#include "cop0.h"
 #include "cpu.h"
 #include "device.h"
 #include "devices.h"
@@ -86,6 +87,7 @@ struct vr41xx_data {
 	uint64_t	rtcl1_period_cycles;
 	uint64_t	etime_cycle_accum;
 	uint64_t	etime_period_cycles;
+	uint32_t	last_count_sample;	/* for DEVICE_TICK cycle delta */
 
 	/*  See icureg.h in NetBSD for more info.  */
 	uint16_t	sysint1;
@@ -462,7 +464,30 @@ DEVICE_TICK(vr41xx)
 	    ? (uint64_t)cpu->machine->emulated_hz : 0;
 	if (emulated_hz == 0)
 		emulated_hz = 131072000ULL;
-	tick_cycles = (uint64_t)(1U << DEV_VR41XX_TICKSHIFT);
+	/*
+	 * Use CP0 Count delta as the true elapsed-cycles measure since the
+	 * last DEVICE_TICK call. Dyntrans batches terminate early (exceptions,
+	 * page boundaries) so the callback fires far more often than the
+	 * nominal 1<<TICKSHIFT cycle interval — treating the tick interval as
+	 * a fixed 1<<TICKSHIFT causes accum to grow 10-100× too fast and
+	 * RTCL1 to assert on nearly every DEVICE_TICK (observed ~131 kHz vs
+	 * 1 kHz spec for WinCE NK). See memory/project_post_ppsh_stall.md
+	 * Pass 8.
+	 */
+	{
+		uint32_t cur_count =
+		    (uint32_t)cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
+		uint32_t count_delta = cur_count - d->last_count_sample;
+		d->last_count_sample = cur_count;
+		/*
+		 * Clamp to a sane upper bound on the first call / after
+		 * Count-register writes by the guest, so a 32-bit wraparound
+		 * or guest-driven reset doesn't inject a 4 GB cycle burst.
+		 */
+		if (count_delta > (uint32_t)(1U << DEV_VR41XX_TICKSHIFT) * 4)
+			count_delta = (uint32_t)(1U << DEV_VR41XX_TICKSHIFT);
+		tick_cycles = count_delta;
+	}
 
 	if (d->etime_period_cycles == 0) {
 		d->etime_period_cycles = emulated_hz /
