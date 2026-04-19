@@ -418,7 +418,17 @@ static void mips_timer_tick(struct timer *timer, void *extra)
 {
 	struct cpu *cpu = (struct cpu *) extra;
 
-	cpu->cd.mips.compare_interrupts_pending ++;
+	/*
+	 * Cap pending at 1. On real hardware CP0 IP7 is level-triggered
+	 * against a single-bit status in CAUSE; consecutive underflows while
+	 * the guest is handling a prior one don't queue. Without the cap the
+	 * wall-clock SIGALRM-based timer can accumulate hundreds of pending
+	 * events if the guest stalls briefly (observed pending=194 during
+	 * WinCE boot), which then re-fires IP7 hundreds of times once the
+	 * guest resumes, swamping the CPU with redundant exceptions.
+	 */
+	if (cpu->cd.mips.compare_interrupts_pending < 1)
+		cpu->cd.mips.compare_interrupts_pending ++;
 
 	if ((int32_t) (cpu->cd.mips.coproc[0]->reg[COP0_COUNT] -
 	    cpu->cd.mips.coproc[0]->reg[COP0_COMPARE]) < 0) {
@@ -786,8 +796,22 @@ void coproc_register_write(struct cpu *cpu,
 				if (compare_diff == 0)
 					hz = 0;
 				else
+					/*
+					 * VR4131 (and generally MIPS32
+					 * implementations in the VR4x family)
+					 * advance CP0 Count at CPU/2. The
+					 * guest programs compare_diff in Count
+					 * units, so the wall-clock timer rate
+					 * is emulated_hz / (2 * diff), not
+					 * emulated_hz / diff. Without the /2,
+					 * the periodic IP7 interrupt fires
+					 * twice as fast as the guest expects
+					 * (measured: 12.6 kHz IP7 storm during
+					 * WinCE cold boot; see pass 7 in
+					 * memory/project_post_ppsh_stall.md).
+					 */
 					hz = (double)cpu->machine->emulated_hz
-					    / (double)compare_diff;
+					    / (2.0 * (double)compare_diff);
 
 				/*  Initialize or re-set the periodic timer:  */
 				if (hz > 0) {
