@@ -47,6 +47,15 @@
 #include "machine.h"
 #include "memory.h"
 #include "mips_cpu_types.h"
+
+/*
+ *  Optional callback from the VR41xx device so that it can resync its
+ *  internal pending state when the CPU takes an edge-triggered interrupt
+ *  exception. Defined weakly so non-VR41xx builds don't need to provide
+ *  a stub.
+ */
+extern void vr41xx_on_interrupt_delivered(struct cpu *cpu,
+    uint32_t cleared_ip_mask) __attribute__((weak));
 #include "opcodes_mips.h"
 #include "settings.h"
 #include "symbol.h"
@@ -2002,6 +2011,23 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	} else {
 		/*  R4000:  */
 		reg[COP0_STATUS] |= STATUS_EXL;
+	}
+
+	/*
+	 *  Edge-triggered IP delivery: for any IP bit that a device has
+	 *  marked as edge-triggered in ip_edge_triggered_mask, clear the
+	 *  bit in CAUSE now that the CPU has taken the exception. Devices
+	 *  that want level-triggered behavior (e.g. CP0 Compare / IP7)
+	 *  simply don't set their bit in the mask and re-assert each batch.
+	 */
+	if (exccode == EXCEPTION_INT &&
+	    cpu->cd.mips.ip_edge_triggered_mask != 0) {
+		if (&vr41xx_on_interrupt_delivered != NULL)
+			vr41xx_on_interrupt_delivered(cpu,
+			    (uint32_t)(reg[COP0_CAUSE] &
+			    cpu->cd.mips.ip_edge_triggered_mask));
+		reg[COP0_CAUSE] &=
+		    ~(uint64_t)cpu->cd.mips.ip_edge_triggered_mask;
 	}
 
 	/*  Sign-extend:  */

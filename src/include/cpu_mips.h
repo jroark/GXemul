@@ -228,6 +228,25 @@ struct mips_cpu {
 	struct interrupt irq_compare;
 	struct timer	*timer;
 
+	/*
+	 *  Edge-triggered IP line auto-clear mask.
+	 *
+	 *  When EXCEPTION_INT fires, any bits in CAUSE that are also set in
+	 *  this mask are cleared. This models edge-triggered delivery: the
+	 *  external source delivers a brief pulse, the CPU takes the
+	 *  exception once, and the pulse is consumed. Opt-in per IP bit via
+	 *  device init; level-triggered sources (which want to hold IP until
+	 *  guest ack) should NOT set their bit here.
+	 *
+	 *  Currently used by dev_vr41xx to make IP2 (VR41xx aggregate) edge-
+	 *  triggered, matching UM §11.2.1 SYSINT1 read-only + §13.2.9
+	 *  RTCINTREG sticky W1C semantics. Without this, WinCE NK's RTCL1
+	 *  ISR re-enters ~15× per underflow because NK does not ack via
+	 *  RTCINTREG and sysint1 bit 2 stays set across the level-held tick
+	 *  window (see memory/project_post_ppsh_stall.md pass 5-7).
+	 */
+	uint32_t	ip_edge_triggered_mask;
+
 	/*  MIPS16 compact encoding mode:  */
 	int		mips16;		/*  1 = currently in MIPS16 mode  */
 	uint64_t	m16_delay_target;  /*  JAL/JALX target (pending delay slot)  */

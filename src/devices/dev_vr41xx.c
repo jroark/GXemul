@@ -169,6 +169,39 @@ void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
                 INTERRUPT_DEASSERT(d->cpu_irq);
 }
 
+/*
+ *  Module-scope pointer to the VR41xx instance, used by the CPU-side
+ *  edge-triggered interrupt callback. BE-300 has exactly one VR41xx.
+ */
+static struct vr41xx_data *g_vr41xx_for_edge_cb = NULL;
+
+/*
+ *  vr41xx_on_interrupt_delivered():
+ *
+ *  Called by mips_cpu_exception() when the CPU takes an EXCEPTION_INT
+ *  whose CAUSE.IP bits include any of ip_edge_triggered_mask. This lets
+ *  the VRIP aggregator resync its internal latches now that the CPU has
+ *  delivered the edge.
+ *
+ *  Currently models only RTCL1 (VRIP line 2 -> sysint1 bit 2 -> IP2).
+ *  cleared_ip_mask is the CAUSE bits that were about to be auto-cleared;
+ *  we use it to scope the deassert to only IP2.
+ */
+void vr41xx_on_interrupt_delivered(struct cpu *cpu, uint32_t cleared_ip_mask)
+{
+	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
+	(void)cpu;
+	if (d == NULL)
+		return;
+	/*  CAUSE bit 10 == IP2 (STATUS_IM_SHIFT + 2). If that's in the
+	    cleared mask, consume the RTCL1 edge.  */
+	if ((cleared_ip_mask & (1u << 10)) != 0 && d->rtcl1_irq_asserted) {
+		d->sysint1 &= ~(1u << 2);
+		d->rtc.rtcint &= ~RTCINT_RTCLONG1_INT;
+		d->rtcl1_irq_asserted = 0;
+	}
+}
+
 
 /*
  *  vr41xx_giu_interrupt_assert():
@@ -467,28 +500,26 @@ DEVICE_TICK(vr41xx)
 	}
 
 	/*
-	 * Route RTCL1 through the VR41xx interrupt controller so the guest
-	 * sees the source in SYSINT1 while CPU IP2 is asserted. Keep a
-	 * small backlog when interrupts are masked, but retire one queued
-	 * event as soon as we emit the pulse.
+	 * RTCL1 delivery model (per VR4131 UM §11.2.1 SYSINT1 read-only,
+	 * §13.2.9 RTCINTREG.RTCINTR1 sticky W1C).
 	 *
-	 * RTCL1 is modeled as an edge pulse: assert this tick, deassert on
-	 * the next. WinCE NK does NOT write RTCINTREG to ack RTCL1 (the
-	 * OAL idle path uses RTCL1 only as a wake source for the SUSPEND
-	 * idle loop and skips bit 2 of SYSINT1 in its dispatcher). A
-	 * level-held IRQ would re-fire EXCEPTION_INT every dyntrans batch
-	 * because NK never deasserts the source. The pulse model matches
-	 * the observed behavior on real hardware where each underflow
-	 * generates a brief interrupt edge that NK observes via SUSPEND
-	 * wake without explicit acknowledge.
+	 * RTCL1 is a brief edge pulse on real hardware. WinCE NK's OAL IP2
+	 * dispatcher does NOT write RTCINTREG to ack (only 2 RTCINTREG
+	 * writes observed across 15 s of boot, both at init), and NK's ISR
+	 * mask manipulation (MSYSINT1=0 then back to 0x0105) has RTCL1 bit 2
+	 * enabled — so with a level-held IRQ, sysint1 bit 2 stays set and
+	 * every eret re-fires the exception, producing a ~99 kHz ISR storm
+	 * (memory/project_post_ppsh_stall.md pass 5-7).
+	 *
+	 * Fix: mark IP2 as edge-triggered via the CPU's ip_edge_triggered
+	 * _mask (set in dev_vr41xx_init below). On EXCEPTION_INT entry,
+	 * cpu_mips.c clears CAUSE.IP2 and calls vr41xx_on_interrupt_delivered
+	 * here so we also clear the VRIP-side latch (sysint1 bit 2 +
+	 * rtc.rtcint RTCINTR1). Net effect: each RTCL1 underflow produces a
+	 * single CPU exception, and the subsequent eret sees IP=0.
 	 */
 	if (d->pending_timer_interrupts > 1)
 		d->pending_timer_interrupts = 1;
-	if (d->rtcl1_irq_asserted && d->pending_timer_interrupts == 0) {
-		INTERRUPT_DEASSERT(d->rtcl1_irq);
-		d->rtcl1_irq_asserted = 0;
-		d->rtc.rtcint &= ~RTCINT_RTCLONG1_INT;
-	}
 	if (d->pending_timer_interrupts > 0) {
 		INTERRUPT_ASSERT(d->rtcl1_irq);
 		d->rtcl1_irq_asserted = 1;
@@ -992,6 +1023,20 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	snprintf(tmps, sizeof(tmps), "%s.cpu[%i].2",
 	    machine->path, machine->bootstrap_cpu);
 	INTERRUPT_CONNECT(tmps, d->cpu_irq);
+
+	/*
+	 *  Mark IP2 as edge-triggered so mips_cpu_exception() auto-clears
+	 *  the IRQ after the CPU takes the exception (see
+	 *  vr41xx_on_interrupt_delivered above). CAUSE.IP2 is bit 10 of
+	 *  CAUSE (STATUS_IM_SHIFT + 2). Without this, WinCE NK's RTCL1 ISR
+	 *  re-enters ~15× per underflow — see memory/project_post_ppsh
+	 *  _stall.md pass 5-7 and VR4131 UM §11.2.1 / §13.2.9.
+	 */
+	{
+		struct cpu *c = machine->cpus[machine->bootstrap_cpu];
+		c->cd.mips.ip_edge_triggered_mask |= (1u << 10);
+	}
+	g_vr41xx_for_edge_cb = d;
 
 	/*
 	 *  Register VRIP interrupt lines 0..25:
