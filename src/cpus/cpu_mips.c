@@ -388,6 +388,21 @@ void mips_cpu_cold_reset(struct cpu *cpu)
 
 	cpu->pc = (int64_t)(int32_t) 0xbfc00000;
 
+	/*
+	 * Re-resolve next_ic from the new PC so the dyntrans engine does
+	 * not continue executing the translated instruction stream from
+	 * before the reset. Mirrors mips_cpu_exception()'s final step
+	 * (see line ~2103-2108): any externally-driven PC redirect from
+	 * inside a DEVICE_ACCESS handler (PMU SOFTRST at dev_vr41xx.c:852,
+	 * KjCMU warm reset at src/be300_devices.c) must call this to avoid
+	 * the CPU linearly walking off into unmapped memory after the
+	 * store instruction retires.
+	 */
+	if (cpu->is_32bit)
+		mips32_pc_to_pointers(cpu);
+	else
+		mips_pc_to_pointers(cpu);
+
 	debugmsg(SUBSYS_CPU, "cpu", VERBOSITY_DEBUG,
 	    "cold reset -> PC=0xBFC00000 (SDRAM and peripherals preserved)");
 }
