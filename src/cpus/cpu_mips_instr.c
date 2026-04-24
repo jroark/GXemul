@@ -2516,6 +2516,45 @@ X(wait)
 
 
 /*
+ *  hibernate_vr41xx: VR4131-family HIBERNATE (COP0 func 0x23).
+ *
+ *  Per VR4131 UM rev 2.00 §6.1.3 (Software shutdown), HIBERNATE puts
+ *  DRAM into self-refresh mode, deasserts MPOWER, and enters reset
+ *  status. Recovery occurs when POWER/WakeUp/DCD/GPIO is asserted, at
+ *  which point the CPU begins the cold reset exception sequence at the
+ *  ROM reset vector (0xBFC00000). A software-shutdown reset initialises
+ *  the entire internal state except RTC timer and PMU.
+ *
+ *  Emulation: collapse the power-down / wakeup-wait to zero wall time
+ *  and jump directly to the cold-reset path. mips_cpu_cold_reset()
+ *  reinitialises CP0 and sets PC to 0xBFC00000 while preserving SDRAM
+ *  and peripherals. This is the software analogue of the Pass 31 KjCMU
+ *  warm-reset at src/be300_devices.c:119 (triggered there by VRC4173
+ *  GPIO writes instead of the HIBERNATE instruction).
+ */
+X(hibernate_vr41xx)
+{
+	if (!cop0_availability_check(cpu, ic))
+		return;
+
+	/*  Sync PC to the hibernate instruction before the reset.  */
+	int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+	    / sizeof(struct mips_instr_call);
+	cpu->pc &= ~((MIPS_IC_ENTRIES_PER_PAGE-1)
+	    << MIPS_INSTR_ALIGNMENT_SHIFT);
+	cpu->pc += (low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
+
+	mips_cpu_cold_reset(cpu);
+
+	/*  mips_cpu_cold_reset() already rebound next_ic via
+	    mips32_pc_to_pointers(). Stop walking the current dyntrans
+	    stream to avoid executing a stale instruction after the store
+	    to HIBERNATE retires.  */
+	cpu->cd.mips.next_ic = &nothing_call;
+}
+
+
+/*
  *  rdhwr: Read CPUNum hardware register into gpr (MIPS32/64 rev 2).
  *
  *  arg[0] = ptr to rt (destination register)
@@ -4400,8 +4439,26 @@ X(to_be_translated)
 				}
 				break;
 			case COP0_HIBERNATE:
-				/*  TODO  */
-				goto bad;
+				/*  VR4131 UM rev 2.00 §6.1.3 (Software
+				    shutdown): HIBERNATE is a software-
+				    triggered cold reset. Route to the
+				    hibernate handler, which calls
+				    mips_cpu_cold_reset().  */
+				ic->f = instr(hibernate_vr41xx);
+				if (cpu->cd.mips.cpu_type.rev != MIPS_R4100) {
+					static int warned = 0;
+					ic->f = instr(reserved);
+					if (!warned &&
+					    !cpu->translation_readahead) {
+						fatal("{ WARNING: Attempt to "
+						    "execute a R41xx HIBERNATE "
+						    "instruction, but the "
+						    "emulated CPU doesn't "
+						    "support it! }\n");
+						warned = 1;
+					}
+				}
+				break;
 			case COP0_SUSPEND:
 				/*  VR4131 UM rev 2.00 §4.3.3 (Suspend Mode):
 				    "The processor remains in Suspend mode
