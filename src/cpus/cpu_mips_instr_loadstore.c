@@ -110,6 +110,8 @@ void LS_GENERIC_N(struct cpu *cpu, struct mips_instr_call *ic)
 			cpu->cd.mips.next_ic = &nothing_call;
 		return;
 	}
+	be300_probe_note_load(cpu, (uint64_t)cpu->pc, (uint64_t)(MODE_uint_t)addr,
+	    data, sizeof(data));
 	x = memory_readmax64(cpu, data, LS_SIZE);
 #ifdef LS_SIGNED
 #ifdef LS_1
@@ -132,6 +134,8 @@ void LS_GENERIC_N(struct cpu *cpu, struct mips_instr_call *ic)
 			cpu->cd.mips.next_ic = &nothing_call;
 		return;
 	}
+	be300_probe_note_store(cpu, (uint64_t)cpu->pc,
+	    (uint64_t)(MODE_uint_t)addr, data, sizeof(data));
 #endif
 }
 #endif	/*  LS_INCLUDE_GENERIC  */
@@ -140,6 +144,7 @@ void LS_GENERIC_N(struct cpu *cpu, struct mips_instr_call *ic)
 void LS_N(struct cpu *cpu, struct mips_instr_call *ic)
 {
 	MODE_uint_t addr = reg(ic->arg[1]) + (int32_t)ic->arg[2];
+	uint64_t exec_pc;
 	unsigned char *p;
 #ifdef MODE32
 #ifdef LS_LOAD
@@ -179,6 +184,15 @@ void LS_N(struct cpu *cpu, struct mips_instr_call *ic)
 	    )) {
 		LS_GENERIC_N(cpu, ic);
 		return;
+	}
+
+	{
+		int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+		    / sizeof(struct mips_instr_call);
+		exec_pc = cpu->pc;
+		exec_pc &= ~((MIPS_IC_ENTRIES_PER_PAGE-1) <<
+		    MIPS_INSTR_ALIGNMENT_SHIFT);
+		exec_pc += (low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
 	}
 
 	addr &= 0xfff;
@@ -259,6 +273,9 @@ void LS_N(struct cpu *cpu, struct mips_instr_call *ic)
 #endif
 #endif	/*  LS_8  */
 
+	be300_probe_note_load(cpu, exec_pc, (uint64_t)(MODE_uint_t)
+	    (reg(ic->arg[1]) + (int32_t)ic->arg[2]), p + addr, LS_SIZE);
+
 #else
 	/*  Store: */
 
@@ -320,6 +337,8 @@ void LS_N(struct cpu *cpu, struct mips_instr_call *ic)
 #endif
 #endif	/*  LS_8  */
 
+	be300_probe_note_store(cpu, exec_pc, (uint64_t)(MODE_uint_t)
+	    (reg(ic->arg[1]) + (int32_t)ic->arg[2]), p + addr, LS_SIZE);
+
 #endif	/*  store  */
 }
-

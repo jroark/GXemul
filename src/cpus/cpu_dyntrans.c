@@ -111,7 +111,21 @@ static void gather_statistics(struct cpu *cpu)
 #if 1
 
 /*  The normal instruction execution core:  */
-#define I	ic = cpu->cd.DYNTRANS_ARCH.next_ic ++; ic->f(cpu, ic);
+#define I	do {							\
+		ic = cpu->cd.DYNTRANS_ARCH.next_ic ++;		\
+		if (!cpu->translation_readahead) {		\
+			int low_pc = ((size_t)ic -			\
+			    (size_t)cpu->cd.DYNTRANS_ARCH.cur_ic_page) / \
+			    sizeof(struct DYNTRANS_IC);		\
+			MODE_uint_t exec_pc = cpu->pc;		\
+			exec_pc &= ~((DYNTRANS_IC_ENTRIES_PER_PAGE-1) << \
+			    DYNTRANS_INSTR_ALIGNMENT_SHIFT);	\
+			exec_pc += (low_pc <<			\
+			    DYNTRANS_INSTR_ALIGNMENT_SHIFT);	\
+			be300_probe_note_exec(cpu, (uint64_t)exec_pc); \
+		}						\
+		ic->f(cpu, ic);					\
+	} while (0)
 
 #else
 
@@ -2023,4 +2037,3 @@ stop_running_translated:
 	ic->f(cpu, ic);
 
 #endif	/*  DYNTRANS_TO_BE_TRANSLATED_TAIL  */
-
