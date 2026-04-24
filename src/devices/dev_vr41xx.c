@@ -218,6 +218,10 @@ void vr41xx_giu_interrupt_assert(struct interrupt *interrupt)
 	struct vr41xx_data *d = (struct vr41xx_data *) interrupt->extra;
 	int line = interrupt->line;
 	d->giuint |= (1 << line);
+	if (line < 16)
+		d->giu_regs[4] |= (1 << line);
+	else
+		d->giu_regs[5] |= (1 << (line - 16));
 	if (d->giuint & d->giumask)
                 INTERRUPT_ASSERT(d->giu_irq);
 }
@@ -984,8 +988,6 @@ DEVICE_ACCESS(vr41xx)
 	case 0x140:	/*  GIUIOSELL - I/O direction select low  */
 	case 0x142:	/*  GIUIOSELH - I/O direction select high  */
 	case 0x146:	/*  GIUPIODH - Pin I/O data high  */
-	case 0x148:	/*  GIUINTSTATL  */
-	case 0x14a:	/*  GIUINTSTATH  */
 	case 0x14c:	/*  GIUINTENL  */
 	case 0x14e:	/*  GIUINTENH  */
 	case 0x150:	/*  GIUINTTYPL  */
@@ -1001,6 +1003,28 @@ DEVICE_ACCESS(vr41xx)
 				if (writeflag == MEM_WRITE)
 					d->giu_regs[idx] = (uint16_t)idata;
 				else
+					odata = d->giu_regs[idx];
+			}
+		}
+		break;
+	case 0x148:	/*  GIUINTSTATL  */
+	case 0x14a:	/*  GIUINTSTATH  */
+		{
+			int idx = ((int)relative_addr - 0x140) / 2;
+			if (idx >= 0 && idx < 16) {
+				if (writeflag == MEM_WRITE) {
+					/*  VR4131 UM sections 14.2.5/14.2.6:
+					    GIUINTSTAT bits are cleared when
+					    1 is written to the bit.  The ICU
+					    level-2 GIUINTL summary reflects
+					    these low GPIO interrupt bits.  */
+					d->giu_regs[idx] &= ~(uint16_t)idata;
+					if (relative_addr == 0x148) {
+						d->giuint &= ~(uint16_t)idata;
+						if ((d->giuint & d->giumask) == 0)
+							INTERRUPT_DEASSERT(d->giu_irq);
+					}
+				} else
 					odata = d->giu_regs[idx];
 			}
 		}
