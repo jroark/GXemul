@@ -56,6 +56,8 @@
 #include "hw/cmu.h"
 #include "hw/pmu.h"
 
+#include "be300_probe.h"
+
 #include "cpu_mips.h"	/* mips_cpu_cold_reset() */
 
 
@@ -1026,6 +1028,11 @@ DEVICE_ACCESS(vr41xx)
 
 	default:
 	unhandled:
+		be300_probe_note_mmio("vr41xx-default",
+		    (uint32_t) relative_addr,
+		    writeflag == MEM_WRITE ? 'W' : 'R',
+		    (uint32_t) len, (uint64_t)(uint32_t) cpu->pc,
+		    BE300_MMIO_CLASS_DEFAULT);
 		if (writeflag == MEM_WRITE)
 			debug("[ vr41xx: unimplemented write to address "
 			    "0x%" PRIx64", data=0x%016" PRIx64" ]\n",
