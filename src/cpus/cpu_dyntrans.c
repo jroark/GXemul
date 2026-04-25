@@ -471,19 +471,16 @@ skip_pc_sync:
 		    cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
 
 		if (cpu->cd.mips.compare_register_set) {
-#if 1
-/*  Not yet.  TODO  */
-			if (cpu->machine->emulated_hz > 0) {
-				if (cpu->cd.mips.compare_interrupts_pending > 0)
+			if (cpu->cd.mips.compare_countdown_cycles > 0) {
+				cpu->cd.mips.compare_countdown_cycles -= n_instrs;
+				if (cpu->cd.mips.compare_countdown_cycles <= 0) {
+					cpu->cd.mips.compare_countdown_cycles = 0;
 					INTERRUPT_ASSERT(
 					    cpu->cd.mips.irq_compare);
-			} else
-#endif
-			{
-				if (diff1 > 0 && diff2 <= 0)
-					INTERRUPT_ASSERT(
-					    cpu->cd.mips.irq_compare);
-			}
+				}
+			} else if (diff1 > 0 && diff2 <= 0)
+				INTERRUPT_ASSERT(
+				    cpu->cd.mips.irq_compare);
 		}
 	}
 #endif

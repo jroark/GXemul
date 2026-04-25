@@ -37,7 +37,6 @@
 struct cpu_family;
 struct emul;
 struct machine;
-struct timer;
 
 /*
  *  CPU type definitions:  See mips_cpu_types.h.
@@ -223,10 +222,9 @@ struct mips_cpu {
 
 	/*  Count/compare timer:  */
 	int		compare_register_set;
-	int		compare_interrupts_pending;
+	int64_t		compare_countdown_cycles;
 	int32_t		count_register_read_count;
 	struct interrupt irq_compare;
-	struct timer	*timer;
 
 	/*
 	 *  Edge-triggered IP line auto-clear mask.

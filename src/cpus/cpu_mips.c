@@ -378,7 +378,7 @@ void mips_cpu_cold_reset(struct cpu *cpu)
 	cpu->cd.mips.rmw                        = 0;
 	cpu->cd.mips.rmw_len                    = 0;
 	cpu->cd.mips.rmw_addr                   = 0;
-	cpu->cd.mips.compare_interrupts_pending = 0;
+	cpu->cd.mips.compare_countdown_cycles   = 0;
 
 	cpu->delay_slot            = NOT_DELAYED;
 	cpu->translation_readahead = 0;

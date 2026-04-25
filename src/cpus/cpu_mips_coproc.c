@@ -412,33 +412,6 @@ struct mips_coproc *mips_coproc_new(struct cpu *cpu, int coproc_nr)
 
 
 /*
- *  mips_timer_tick():
- */
-static void mips_timer_tick(struct timer *timer, void *extra)
-{
-	struct cpu *cpu = (struct cpu *) extra;
-
-	/*
-	 * Cap pending at 1. On real hardware CP0 IP7 is level-triggered
-	 * against a single-bit status in CAUSE; consecutive underflows while
-	 * the guest is handling a prior one don't queue. Without the cap the
-	 * wall-clock SIGALRM-based timer can accumulate hundreds of pending
-	 * events if the guest stalls briefly (observed pending=194 during
-	 * WinCE boot), which then re-fires IP7 hundreds of times once the
-	 * guest resumes, swamping the CPU with redundant exceptions.
-	 */
-	if (cpu->cd.mips.compare_interrupts_pending < 1)
-		cpu->cd.mips.compare_interrupts_pending ++;
-
-	if ((int32_t) (cpu->cd.mips.coproc[0]->reg[COP0_COUNT] -
-	    cpu->cd.mips.coproc[0]->reg[COP0_COMPARE]) < 0) {
-		cpu->cd.mips.coproc[0]->reg[COP0_COUNT] =
-		    cpu->cd.mips.coproc[0]->reg[COP0_COMPARE];
-	}
-}
-
-
-/*
  *  mips_coproc_tlb_set_entry():
  *
  *  Used by machine setup code, if a specific machine emulation starts up
@@ -785,52 +758,26 @@ void coproc_register_write(struct cpu *cpu,
 			unimpl = 0;
 			break;
 		case COP0_COMPARE:
-			if (cpu->machine->emulated_hz > 0) {
-				int32_t compare_diff = tmp -
-				    cp->reg[COP0_COMPARE];
-				double hz;
-
-				if (compare_diff < 0)
-					hz = tmp - cp->reg[COP0_COUNT];
-
-				if (compare_diff == 0)
-					hz = 0;
-				else
-					/*
-					 * VR4131 (and generally MIPS32
-					 * implementations in the VR4x family)
-					 * advance CP0 Count at CPU/2. The
-					 * guest programs compare_diff in Count
-					 * units, so the wall-clock timer rate
-					 * is emulated_hz / (2 * diff), not
-					 * emulated_hz / diff. Without the /2,
-					 * the periodic IP7 interrupt fires
-					 * twice as fast as the guest expects
-					 * (measured: 12.6 kHz IP7 storm during
-					 * WinCE cold boot; see pass 7 in
-					 * memory/project_post_ppsh_stall.md).
-					 */
-					hz = (double)cpu->machine->emulated_hz
-					    / (2.0 * (double)compare_diff);
-
-				/*  Initialize or re-set the periodic timer:  */
-				if (hz > 0) {
-					if (cpu->cd.mips.timer == NULL)
-						cpu->cd.mips.timer = timer_add(
-						    hz, mips_timer_tick, cpu);
-					else
-						timer_update_frequency(
-						    cpu->cd.mips.timer, hz);
-				}
-			}
-
-			/*  Ack the periodic timer, if it was asserted:  */
-			if (cp->reg[COP0_CAUSE] & 0x8000 &&
-			    cpu->cd.mips.compare_interrupts_pending > 0)
-				cpu->cd.mips.compare_interrupts_pending --;
+			/*
+			 * Drive CP0 Compare from emulated instruction progress,
+			 * not the host SIGALRM timer. VR4131 UM §7.1 and the
+			 * R4000 Count/Compare model define Count as a CPU/2
+			 * timebase; the guest-visible Compare interrupt must
+			 * therefore follow emulated CPU progress, not host time.
+			 * This emulator currently advances COP0_COUNT once per
+			 * guest instruction, so convert the guest's Count delta to
+			 * instruction cycles with *2 here. Host-wall-clock delivery
+			 * makes WinCE scheduler ticks trace-speed dependent.
+			 */
+			cpu->cd.mips.compare_countdown_cycles =
+			    (int64_t)((uint32_t)tmp -
+			    (uint32_t)cp->reg[COP0_COUNT]) * 2;
+			if (cpu->cd.mips.compare_countdown_cycles <= 0)
+				cpu->cd.mips.compare_countdown_cycles = 1;
 
 			/*  Clear the timer interrupt assertion (bit 7):  */
 			cp->reg[COP0_CAUSE] &= ~0x8000;
+			INTERRUPT_DEASSERT(cpu->cd.mips.irq_compare);
 
 			if (tmp != (uint64_t)(int64_t)(int32_t)tmp)
 				fatal("[ WARNING: trying to write a 64-bit value"
@@ -2309,4 +2256,3 @@ void coproc_function(struct cpu *cpu, struct mips_coproc *cp, int cpnr,
 
 	mips_cpu_exception(cpu, EXCEPTION_CPU, 0, 0, cp->coproc_nr, 0, 0, 0);
 }
-
