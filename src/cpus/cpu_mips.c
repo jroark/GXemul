@@ -2103,12 +2103,12 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	 */
 	if (exccode == EXCEPTION_INT &&
 	    cpu->cd.mips.ip_edge_triggered_mask != 0) {
-		if (&vr41xx_on_interrupt_delivered != NULL)
-			vr41xx_on_interrupt_delivered(cpu,
-			    (uint32_t)(reg[COP0_CAUSE] &
-			    cpu->cd.mips.ip_edge_triggered_mask));
+		uint32_t cleared_ip_mask = (uint32_t)(reg[COP0_CAUSE] &
+		    cpu->cd.mips.ip_edge_triggered_mask);
 		reg[COP0_CAUSE] &=
 		    ~(uint64_t)cpu->cd.mips.ip_edge_triggered_mask;
+		if (&vr41xx_on_interrupt_delivered != NULL)
+			vr41xx_on_interrupt_delivered(cpu, cleared_ip_mask);
 	}
 
 	/*  Sign-extend:  */
@@ -2128,4 +2128,3 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 
 
 #include "tmp_mips_tail.c"
-

@@ -189,9 +189,10 @@ static struct vr41xx_data *g_vr41xx_for_edge_cb = NULL;
  *  the VRIP aggregator resync its internal latches now that the CPU has
  *  delivered the edge.
  *
- *  Currently models only RTCL1 (VRIP line 2 -> sysint1 bit 2 -> IP2).
- *  cleared_ip_mask is the CAUSE bits that were about to be auto-cleared;
- *  we use it to scope the deassert to only IP2.
+ *  IP2 is the shared VRIP CPU line for SYSINT1/SYSINT2 sources. RTCL1 is
+ *  edge-triggered and consumed on delivery (VR4131 UM sections 11.2.1
+ *  and 13.2.9). Other enabled level sources such as GIU/touch must keep
+ *  IP2 asserted after the CPU-side edge latch is cleared.
  */
 void vr41xx_on_interrupt_delivered(struct cpu *cpu, uint32_t cleared_ip_mask)
 {
@@ -205,6 +206,13 @@ void vr41xx_on_interrupt_delivered(struct cpu *cpu, uint32_t cleared_ip_mask)
 		d->sysint1 &= ~(1u << 2);
 		d->rtc.rtcint &= ~RTCINT_RTCLONG1_INT;
 		d->rtcl1_irq_asserted = 0;
+	}
+	if ((cleared_ip_mask & (1u << 10)) != 0) {
+		if ((d->sysint1 & d->msysint1) ||
+		    (d->sysint2 & d->msysint2))
+			INTERRUPT_ASSERT(d->cpu_irq);
+		else
+			INTERRUPT_DEASSERT(d->cpu_irq);
 	}
 }
 
