@@ -41,6 +41,7 @@
 #include "machine.h"
 #include "memory.h"
 #include "misc.h"
+#include "pcconnect.h"
 
 #include "thirdparty/comreg.h"
 
@@ -68,7 +69,59 @@ struct ns_data {
 	int		databits;
 	char		parity;
 	const char	*stopbits;
+	int		tx_interrupt_pending;
 };
+
+static void ns16550_update_tx_ready(struct ns_data *d)
+{
+	d->reg[com_lsr] |= LSR_TXRDY | LSR_TSRE;
+}
+
+static void ns16550_update_modem_status(struct ns_data *d,
+	int pcconnect_active)
+{
+	unsigned char old_lines;
+	unsigned char new_lines;
+	unsigned char delta;
+
+	old_lines = d->reg[com_msr] & (MSR_DCD | MSR_RI | MSR_DSR | MSR_CTS);
+	delta = d->reg[com_msr] &
+	    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS);
+
+	if (pcconnect_active) {
+		new_lines = pcconnect_cable_connected() ?
+		    (MSR_DCD | MSR_DSR | MSR_CTS) : 0;
+	} else {
+		new_lines = MSR_DCD | MSR_DSR | MSR_CTS;
+	}
+
+	if ((old_lines ^ new_lines) & MSR_DCD)
+		delta |= MSR_DDCD;
+	if ((old_lines ^ new_lines) & MSR_RI)
+		delta |= MSR_TERI;
+	if ((old_lines ^ new_lines) & MSR_DSR)
+		delta |= MSR_DDSR;
+	if ((old_lines ^ new_lines) & MSR_CTS)
+		delta |= MSR_DCTS;
+
+	d->reg[com_msr] = new_lines | delta;
+}
+
+static int ns16550_irq_gate_open(struct ns_data *d, int pcconnect_active)
+{
+	/*
+	 * PC/ISA COM ports route UART IRQ through MCR.OUT2, but the BE-300
+	 * companion SIU is an MMIO UART at 0xaa008680 with its interrupt routed
+	 * through the VR4131/VRC4173 interrupt fabric instead (hardware.txt:
+	 * 191 and 200).  serial.dll leaves MCR.OUT2 clear while enabling IER
+	 * modem-status interrupts, so treating OUT2 as an external gate loses
+	 * the receive/modem interrupt edge on the PC Connect dock UART.
+	 */
+	if (pcconnect_active && d->name && strcmp(d->name, "vrc4173siu") == 0)
+		return 1;
+
+	return (d->reg[com_mcr] & MCR_IENABLE) != 0;
+}
 
 
 DEVICE_TICK(ns16550)
@@ -79,20 +132,48 @@ DEVICE_TICK(ns16550)
 	 *  transmitter slot is empty (i.e. the ns16550 is ready to transmit).
 	 */
 	struct ns_data *d = (struct ns_data *) extra;
+	int pcconnect_active = pcconnect_ns16550_claims(d->name);
+	int modem_pending = 0;
+	int rx_pending = 0;
+	int interrupt_pending;
+	unsigned char iir_reason = IIR_NOPEND;
 
-	d->reg[com_iir] &= ~IIR_RXRDY;
-	if (console_charavail(d->console_handle))
-		d->reg[com_iir] |= IIR_RXRDY;
+	if (pcconnect_active) {
+		ns16550_update_tx_ready(d);
+		ns16550_update_modem_status(d, pcconnect_active);
+		modem_pending = (d->reg[com_msr] &
+		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
+	}
+
+	if (pcconnect_active && pcconnect_uart_rx_available())
+		rx_pending = 1;
+	else if (!pcconnect_active && console_charavail(d->console_handle))
+		rx_pending = 1;
 
 	/*
 	 *  If interrupts are enabled, and interrupts are pending, then
 	 *  cause a CPU interrupt.
  	 */
 
-	if (((d->reg[com_ier] & IER_ETXRDY) && (d->reg[com_iir] & IIR_TXRDY)) ||
-	    ((d->reg[com_ier] & IER_ERXRDY) && (d->reg[com_iir] & IIR_RXRDY))) {
-		d->reg[com_iir] &= ~IIR_NOPEND;
-		if (d->reg[com_mcr] & MCR_IENABLE) {
+	if ((d->reg[com_ier] & IER_ERXRDY) && rx_pending)
+		iir_reason = IIR_RXRDY;
+	else if ((d->reg[com_ier] & IER_ETXRDY) &&
+	    d->tx_interrupt_pending)
+		iir_reason = IIR_TXRDY;
+	else if (pcconnect_active && (d->reg[com_ier] & IER_EMSC) &&
+	    modem_pending)
+		iir_reason = IIR_MLSC;
+
+	/*
+	 * The IIR low nibble is an interrupt identification value, not a
+	 * bitmask.  Combining RXRDY with a stale TXRDY bit produces 0x06,
+	 * which identifies receiver line status instead of available data.
+	 */
+	d->reg[com_iir] = (d->reg[com_iir] & ~IIR_IMASK) | iir_reason;
+	interrupt_pending = iir_reason != IIR_NOPEND;
+
+	if (interrupt_pending) {
+		if (ns16550_irq_gate_open(d, pcconnect_active)) {
 			INTERRUPT_ASSERT(d->irq);
 			d->int_asserted = 1;
 		}
@@ -110,6 +191,7 @@ DEVICE_ACCESS(ns16550)
 	uint64_t idata = 0, odata=0;
 	size_t i;
 	struct ns_data *d = (struct ns_data *) extra;
+	int pcconnect_active = pcconnect_ns16550_claims(d->name);
 
 	if (writeflag == MEM_WRITE)
 		idata = memory_readmax64(cpu, data, len);
@@ -124,15 +206,20 @@ DEVICE_ACCESS(ns16550)
 	/*
 	 *  Always ready to transmit:
 	 */
-	d->reg[com_lsr] |= LSR_TXRDY | LSR_TSRE;
-	d->reg[com_msr] |= MSR_DCD | MSR_DSR | MSR_CTS;
+	ns16550_update_tx_ready(d);
+	if (pcconnect_active)
+		ns16550_update_modem_status(d, pcconnect_active);
+	else
+		d->reg[com_msr] |= MSR_DCD | MSR_DSR | MSR_CTS;
 
 	d->reg[com_iir] &= ~0xf0;
 	if (d->enable_fifo)
 		d->reg[com_iir] |= ((d->fcr << 5) & 0xc0);
 
 	d->reg[com_lsr] &= ~LSR_RXRDY;
-	if (console_charavail(d->console_handle))
+	if (pcconnect_active && pcconnect_uart_rx_available())
+		d->reg[com_lsr] |= LSR_RXRDY;
+	else if (!pcconnect_active && console_charavail(d->console_handle))
 		d->reg[com_lsr] |= LSR_RXRDY;
 
 	relative_addr /= d->addrmult;
@@ -161,11 +248,14 @@ DEVICE_ACCESS(ns16550)
 		if (writeflag == MEM_WRITE) {
 			if (d->reg[com_mcr] & MCR_LOOPBACK)
 				console_makeavail(d->console_handle, idata);
+			else if (pcconnect_active)
+				pcconnect_uart_tx_byte(idata);
 			else
 				console_putchar(d->console_handle, idata);
-			d->reg[com_iir] |= IIR_TXRDY;
+			d->tx_interrupt_pending = 1;
 		} else {
-			int x = console_readchar(d->console_handle);
+			int x = pcconnect_active ? pcconnect_uart_rx_pop() :
+			    console_readchar(d->console_handle);
 			odata = x < 0? 0 : x;
 		}
 		dev_ns16550_tick(cpu, d);
@@ -192,9 +282,9 @@ DEVICE_ACCESS(ns16550)
 				    "\n", d->name, (int)idata);
 
 			/*  Needed for NetBSD 2.0.x, but not 1.6.2?  */
-			if (!(d->reg[com_ier] & IER_ETXRDY)
-			    && (idata & IER_ETXRDY))
-				d->reg[com_iir] |= IIR_TXRDY;
+			if (!(d->reg[com_ier] & IER_ETXRDY) &&
+			    (idata & IER_ETXRDY))
+				d->tx_interrupt_pending = 1;
 
 			d->reg[com_ier] = idata;
 			dev_ns16550_tick(cpu, d);
@@ -209,8 +299,8 @@ DEVICE_ACCESS(ns16550)
 			d->fcr = idata;
 		} else {
 			odata = d->reg[com_iir];
-			if (d->reg[com_iir] & IIR_TXRDY)
-				d->reg[com_iir] &= ~IIR_TXRDY;
+			if ((d->reg[com_iir] & IIR_IMASK) == IIR_TXRDY)
+				d->tx_interrupt_pending = 0;
 			debug("[ ns16550 (%s): read from iir: 0x%02x ]\n",
 			    d->name, (int)odata);
 			dev_ns16550_tick(cpu, d);
@@ -236,8 +326,12 @@ DEVICE_ACCESS(ns16550)
 			d->reg[com_msr] = idata;
 		} else {
 			odata = d->reg[com_msr];
+			if (pcconnect_active)
+				d->reg[com_msr] &= MSR_DCD | MSR_RI | MSR_DSR | MSR_CTS;
 			debug("[ ns16550 (%s): read from msr: 0x%02x ]\n",
 			    d->name, (int)odata);
+			if (pcconnect_active)
+				dev_ns16550_tick(cpu, d);
 		}
 		break;
 
@@ -284,9 +378,9 @@ DEVICE_ACCESS(ns16550)
 			d->reg[com_mcr] = idata;
 			debug("[ ns16550 (%s): write to mcr: 0x%02x ]\n",
 			    d->name, (int)idata);
-			if (!(d->reg[com_iir] & IIR_TXRDY)
-			    && (idata & MCR_IENABLE))
-				d->reg[com_iir] |= IIR_TXRDY;
+			if (!d->tx_interrupt_pending &&
+			    (idata & MCR_IENABLE))
+				d->tx_interrupt_pending = 1;
 			dev_ns16550_tick(cpu, d);
 		} else {
 			odata = d->reg[com_mcr];
@@ -310,8 +404,23 @@ DEVICE_ACCESS(ns16550)
 		}
 	}
 
+	if (pcconnect_active) {
+		pcconnect_note_uart_config(d->name, d->reg[com_lctl],
+		    d->reg[com_mcr], d->reg[com_ier], d->divisor, d->dlab);
+	}
+
 	if (writeflag == MEM_READ)
 		memory_writemax64(cpu, data, len, odata);
+
+	if (pcconnect_trace_enabled() && pcconnect_active) {
+		pcconnect_trace_uart_access(d->name, pcconnect_active,
+		    writeflag == MEM_WRITE, (unsigned)relative_addr,
+		    (uint8_t)(writeflag == MEM_WRITE ? idata : odata),
+		    (uint32_t)cpu->pc,
+		    d->reg[com_ier], d->reg[com_iir],
+		    d->reg[com_lctl], d->reg[com_mcr], d->reg[com_lsr],
+		    d->reg[com_msr], d->dlab, d->divisor);
+	}
 
 	return 1;
 }
@@ -364,4 +473,3 @@ DEVINIT(ns16550)
 
 	return 1;
 }
-
