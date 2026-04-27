@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -45,6 +46,176 @@
 
 /*  #define debug fatal  */
 static int net_ip_debug = 0;	// replace by debugmsg(....)
+
+
+static int net_ip_dns_extract_query_name(unsigned char *dns, int dns_len,
+	int *qtype_out, int *qclass_out, int *question_end_out,
+	char *hostname, size_t hostname_len)
+{
+	int pos = 12, out = 0;
+
+	if (dns_len < 17 || hostname_len == 0)
+		return 0;
+
+	while (pos < dns_len) {
+		unsigned char label_len = dns[pos++];
+
+		if (label_len == 0)
+			break;
+		if ((label_len & 0xc0) != 0 || pos + label_len > dns_len)
+			return 0;
+
+		if (out != 0) {
+			if ((size_t)out + 1 >= hostname_len)
+				return 0;
+			hostname[out++] = '.';
+		}
+		if ((size_t)out + label_len >= hostname_len)
+			return 0;
+		memcpy(hostname + out, dns + pos, label_len);
+		out += label_len;
+		pos += label_len;
+	}
+
+	if (pos + 4 > dns_len || out == 0)
+		return 0;
+
+	hostname[out] = '\0';
+	*qtype_out = (dns[pos] << 8) + dns[pos + 1];
+	*qclass_out = (dns[pos + 2] << 8) + dns[pos + 3];
+	*question_end_out = pos + 4;
+	return 1;
+}
+
+
+static int net_ip_dns_resolve_a(const char *hostname, unsigned char *addr_out)
+{
+	struct addrinfo hints, *res = NULL, *ai;
+	int err;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+
+	err = getaddrinfo(hostname, NULL, &hints, &res);
+	if (err != 0)
+		return 0;
+
+	for (ai = res; ai != NULL; ai = ai->ai_next) {
+		struct sockaddr_in *sin;
+
+		if (ai->ai_family != AF_INET ||
+		    ai->ai_addrlen < (socklen_t)sizeof(struct sockaddr_in))
+			continue;
+		sin = (struct sockaddr_in *)ai->ai_addr;
+		memcpy(addr_out, &sin->sin_addr, 4);
+		freeaddrinfo(res);
+		return 1;
+	}
+
+	freeaddrinfo(res);
+	return 0;
+}
+
+
+static int net_ip_udp_gateway_dns(struct net *net, struct nic_data *nic,
+	unsigned char *packet, int len)
+{
+	unsigned char *dns, resolved_addr[4];
+	struct ethernet_packet_link *lp;
+	char hostname[256];
+	int srcport, dstport, udp_len, dns_len;
+	int qtype, qclass, question_end;
+	int resolved, answer_len, dns_reply_len, reply_len, ip_len, udp_reply_len;
+
+	srcport = (packet[34] << 8) + packet[35];
+	dstport = (packet[36] << 8) + packet[37];
+	if (dstport != 53 ||
+	    memcmp(packet + 30, &net->gateway_ipv4_addr[0], 4) != 0)
+		return 0;
+
+	udp_len = (packet[38] << 8) + packet[39];
+	if (udp_len < 8 || len < 42 || len < 34 + udp_len)
+		return 0;
+
+	dns = packet + 42;
+	dns_len = udp_len - 8;
+	if (dns_len < 12)
+		return 0;
+
+	if (dns[4] != 0 || dns[5] != 1 ||
+	    !net_ip_dns_extract_query_name(dns, dns_len, &qtype, &qclass,
+	    &question_end, hostname, sizeof(hostname)))
+		return 0;
+
+	if (qclass != 1 || qtype != 1)
+		return 0;
+
+	resolved = net_ip_dns_resolve_a(hostname, resolved_addr);
+	answer_len = resolved ? 16 : 0;
+	dns_reply_len = question_end + answer_len;
+	udp_reply_len = 8 + dns_reply_len;
+	ip_len = 20 + udp_reply_len;
+	reply_len = 14 + ip_len;
+
+	lp = net_allocate_ethernet_packet_link(net, nic, reply_len);
+
+	memcpy(lp->data + 0, packet + 6, 6);
+	memcpy(lp->data + 6, net->gateway_ethernet_addr, 6);
+	lp->data[12] = 0x08;
+	lp->data[13] = 0x00;
+
+	lp->data[14] = 0x45;
+	lp->data[15] = 0x00;
+	lp->data[16] = ip_len >> 8;
+	lp->data[17] = ip_len & 0xff;
+	lp->data[18] = (net->timestamp >> 8) & 0xff;
+	lp->data[19] = net->timestamp & 0xff;
+	lp->data[20] = 0x00;
+	lp->data[21] = 0x00;
+	lp->data[22] = 0x40;
+	lp->data[23] = 17;
+	memcpy(lp->data + 26, net->gateway_ipv4_addr, 4);
+	memcpy(lp->data + 30, packet + 26, 4);
+	net_ip_checksum(lp->data + 14, 10, 20);
+
+	lp->data[34] = dstport >> 8;
+	lp->data[35] = dstport & 0xff;
+	lp->data[36] = srcport >> 8;
+	lp->data[37] = srcport & 0xff;
+	lp->data[38] = udp_reply_len >> 8;
+	lp->data[39] = udp_reply_len & 0xff;
+	lp->data[40] = 0;
+	lp->data[41] = 0;
+
+	memcpy(lp->data + 42, dns, question_end);
+	lp->data[44] = 0x80 | (dns[2] & 0x01);
+	lp->data[45] = resolved ? 0x80 : 0x83;
+	lp->data[48] = 0;
+	lp->data[49] = resolved ? 1 : 0;
+	lp->data[50] = lp->data[51] = 0;
+	lp->data[52] = lp->data[53] = 0;
+
+	if (resolved) {
+		unsigned char *answer = lp->data + 42 + question_end;
+
+		answer[0] = 0xc0;
+		answer[1] = 0x0c;
+		answer[2] = 0x00;
+		answer[3] = 0x01;
+		answer[4] = 0x00;
+		answer[5] = 0x01;
+		answer[6] = 0x00;
+		answer[7] = 0x00;
+		answer[8] = 0x00;
+		answer[9] = 0x3c;
+		answer[10] = 0x00;
+		answer[11] = 0x04;
+		memcpy(answer + 12, resolved_addr, 4);
+	}
+
+	net->timestamp ++;
+	return 1;
+}
 
 
 
@@ -762,6 +933,9 @@ static void net_ip_udp(struct net *net, struct nic_data *nic,
 	dstport = (packet[36] << 8) + packet[37];
 	udp_len = (packet[38] << 8) + packet[39];
 	/*  chksum at offset 40 and 41  */
+
+	if (net_ip_udp_gateway_dns(net, nic, packet, len))
+		return;
 
 	debug("[ net: UDP: ");
 	debug("srcport=%i dstport=%i len=%i ", srcport, dstport, udp_len);
