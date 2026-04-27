@@ -88,7 +88,21 @@ static void ns16550_update_modem_status(struct ns_data *d,
 	delta = d->reg[com_msr] &
 	    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS);
 
-	if (pcconnect_active) {
+	if (pcconnect_active && d->name && strcmp(d->name, "vrc4173siu") == 0) {
+		/*
+		 * The BE-300 companion SIU is selected by the VRC4173
+		 * Vic/CommMode socket path (hardware.txt:88-102, 190-191),
+		 * not by PC/ISA-style modem input levels.  serial.dll probes
+		 * the UART before the emulated cable edge and expects the same
+		 * stable DCD/DSR/CTS level the generic ns16550 model exposes;
+		 * dropping these lines until cable insertion prevents the later
+		 * COM open path from running.  Do not synthesize delta bits for
+		 * that stable level: the companion socket path reports cable
+		 * transitions via AA008004, not PC-style MSR edge inputs.
+		 */
+		d->reg[com_msr] = MSR_DCD | MSR_DSR | MSR_CTS;
+		return;
+	} else if (pcconnect_active) {
 		new_lines = pcconnect_cable_connected() ?
 		    (MSR_DCD | MSR_DSR | MSR_CTS) : 0;
 	} else {
