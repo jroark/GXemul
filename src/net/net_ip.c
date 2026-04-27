@@ -938,6 +938,50 @@ void net_ip(struct net *net, struct nic_data *nic, unsigned char *packet,
 }
 
 
+#define DHCP_COOKIE_OFFSET	278
+#define DHCP_OPTIONS_OFFSET	282
+#define DHCP_OPTION_END		255
+#define DHCP_OPTION_PAD		0
+#define DHCP_OPTION_MESSAGE	53
+#define DHCP_OPTION_LEASE_TIME	51
+#define DHCP_OFFER		2
+#define DHCP_REQUEST		3
+#define DHCP_ACK		5
+
+static int net_ip_dhcp_message_type(unsigned char *packet, int len)
+{
+	int offset;
+
+	if (len < DHCP_OPTIONS_OFFSET ||
+	    packet[DHCP_COOKIE_OFFSET + 0] != 99 ||
+	    packet[DHCP_COOKIE_OFFSET + 1] != 130 ||
+	    packet[DHCP_COOKIE_OFFSET + 2] != 83 ||
+	    packet[DHCP_COOKIE_OFFSET + 3] != 99)
+		return -1;
+
+	offset = DHCP_OPTIONS_OFFSET;
+	while (offset < len) {
+		unsigned char code = packet[offset++];
+		unsigned char option_len;
+
+		if (code == DHCP_OPTION_PAD)
+			continue;
+		if (code == DHCP_OPTION_END)
+			break;
+		if (offset >= len)
+			break;
+
+		option_len = packet[offset++];
+		if (offset + option_len > len)
+			break;
+		if (code == DHCP_OPTION_MESSAGE && option_len >= 1)
+			return packet[offset];
+		offset += option_len;
+	}
+
+	return -1;
+}
+
 /*
  *  net_ip_broadcast_dhcp():
  *
@@ -950,7 +994,7 @@ static void net_ip_broadcast_dhcp(struct net *net, struct nic_data *nic,
 	unsigned char *packet, int len)
 {
 	struct ethernet_packet_link *lp;
-        int i, reply_len;
+        int i, reply_len, request_type, reply_type, option_offset;
 
 	if (ENOUGH_VERBOSITY(SUBSYS_NET, VERBOSITY_DEBUG)) {
 		char s[4000];
@@ -1016,7 +1060,10 @@ static void net_ip_broadcast_dhcp(struct net *net, struct nic_data *nic,
 	fatal(" ]\n");
 #endif
 
-        reply_len = 307;
+	request_type = net_ip_dhcp_message_type(packet, len);
+	reply_type = request_type == DHCP_REQUEST ? DHCP_ACK : DHCP_OFFER;
+
+        reply_len = 316;
         lp = net_allocate_ethernet_packet_link(net, nic, reply_len);
 
         /*  From old packet, copy everything before options field:  */
@@ -1051,8 +1098,11 @@ static void net_ip_broadcast_dhcp(struct net *net, struct nic_data *nic,
 	lp->data[60] = 0;
 	lp->data[61] = 1;	/*  TODO  */
 
-	/*  Server's IPv4 address:  (giaddr)  */
-	memcpy(lp->data + 66, &net->gateway_ipv4_addr[0], 4);
+	/*  Server's IPv4 address:  (siaddr)  */
+	memcpy(lp->data + 62, &net->gateway_ipv4_addr[0], 4);
+
+	/*  Gateway/relay agent address:  */
+	lp->data[66] = lp->data[67] = lp->data[68] = lp->data[69] = 0;
 
 	/*  This is a Reply:  */
 	lp->data[42] = 0x02;
@@ -1065,23 +1115,36 @@ static void net_ip_broadcast_dhcp(struct net *net, struct nic_data *nic,
 	lp->data[280] = 83;
 	lp->data[281] = 99;
 
-	/*  DHCP options, http://tools.ietf.org/html/rfc1533  */
-	lp->data[282] = 1; /* subnet mask */
-	lp->data[283] = 4;
-	lp->data[284] = 255;
-	lp->data[285] = 0;
-	lp->data[286] = 0;
-	lp->data[287] = 0;
-	lp->data[288] = 3; /* router */
-	lp->data[289] = 4;
-	memcpy(lp->data + 290, &net->gateway_ipv4_addr[0], 4);
-	lp->data[294] = 6; /* domain name server */
-	lp->data[295] = 4;
-	memcpy(lp->data + 296, &net->gateway_ipv4_addr[0], 4);
-	lp->data[300] = 54; /* server identifier */
-	lp->data[301] = 4;
-	memcpy(lp->data + 302, &net->gateway_ipv4_addr[0], 4);
-	lp->data[306] = 255; /* end */
+	/*  DHCP options, RFC 2132.  */
+	option_offset = 282;
+	lp->data[option_offset++] = DHCP_OPTION_MESSAGE;
+	lp->data[option_offset++] = 1;
+	lp->data[option_offset++] = reply_type;
+	lp->data[option_offset++] = 1; /* subnet mask */
+	lp->data[option_offset++] = 4;
+	lp->data[option_offset++] = 255;
+	lp->data[option_offset++] = 0;
+	lp->data[option_offset++] = 0;
+	lp->data[option_offset++] = 0;
+	lp->data[option_offset++] = 3; /* router */
+	lp->data[option_offset++] = 4;
+	memcpy(lp->data + option_offset, &net->gateway_ipv4_addr[0], 4);
+	option_offset += 4;
+	lp->data[option_offset++] = 6; /* domain name server */
+	lp->data[option_offset++] = 4;
+	memcpy(lp->data + option_offset, &net->gateway_ipv4_addr[0], 4);
+	option_offset += 4;
+	lp->data[option_offset++] = 54; /* server identifier */
+	lp->data[option_offset++] = 4;
+	memcpy(lp->data + option_offset, &net->gateway_ipv4_addr[0], 4);
+	option_offset += 4;
+	lp->data[option_offset++] = DHCP_OPTION_LEASE_TIME;
+	lp->data[option_offset++] = 4;
+	lp->data[option_offset++] = 0x00;
+	lp->data[option_offset++] = 0x01;
+	lp->data[option_offset++] = 0x51;
+	lp->data[option_offset++] = 0x80;
+	lp->data[option_offset++] = DHCP_OPTION_END;
 
 	/*  Recalculate IP header checksum:  */
 	net_ip_checksum(lp->data + 14, 10, 20);
@@ -1582,5 +1645,3 @@ void net_tcp_rx_avail(struct net *net, struct nic_data *nic)
 		    net->timestamp;
 	}
 }
-
-
