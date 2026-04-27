@@ -218,6 +218,131 @@ static int net_ip_udp_gateway_dns(struct net *net, struct nic_data *nic,
 }
 
 
+static int net_ip_nbns_name_is_ppp_peer(unsigned char *encoded_name)
+{
+	unsigned char decoded[16];
+	const char ppp_peer[] = "PPP_PEER";
+	int i;
+
+	for (i=0; i<16; i++) {
+		int hi = encoded_name[i * 2] - 'A';
+		int lo = encoded_name[i * 2 + 1] - 'A';
+
+		if (hi < 0 || hi > 15 || lo < 0 || lo > 15)
+			return 0;
+		decoded[i] = (hi << 4) | lo;
+	}
+
+	if (memcmp(decoded, ppp_peer, sizeof(ppp_peer) - 1) != 0)
+		return 0;
+	for (i=(int)sizeof(ppp_peer) - 1; i<15; i++)
+		if (decoded[i] != ' ')
+			return 0;
+
+	return decoded[15] == 0x00;
+}
+
+
+static int net_ip_broadcast_nbns(struct net *net, struct nic_data *nic,
+	unsigned char *packet, int len)
+{
+	unsigned char *nbns, *answer;
+	struct ethernet_packet_link *lp;
+	int srcport, dstport, udp_len, nbns_len, qtype, qclass;
+	int answer_name_len, nbns_reply_len;
+	int udp_reply_len, ip_len, reply_len;
+
+	if (packet[14] != 0x45 || packet[23] != 0x11)
+		return 0;
+
+	srcport = (packet[34] << 8) + packet[35];
+	dstport = (packet[36] << 8) + packet[37];
+	if (dstport != 137)
+		return 0;
+
+	udp_len = (packet[38] << 8) + packet[39];
+	if (udp_len < 8 || len < 42 || len < 34 + udp_len)
+		return 0;
+
+	nbns = packet + 42;
+	nbns_len = udp_len - 8;
+	if (nbns_len < 50)
+		return 0;
+
+	if (nbns[4] != 0 || nbns[5] != 1)
+		return 0;
+	if (nbns[12] != 0x20 || nbns[45] != 0x00)
+		return 0;
+	if (!net_ip_nbns_name_is_ppp_peer(nbns + 13))
+		return 0;
+
+	qtype = (nbns[46] << 8) + nbns[47];
+	qclass = (nbns[48] << 8) + nbns[49];
+	if (qtype != 0x0020 || qclass != 0x0001)
+		return 0;
+
+	answer_name_len = 34;
+	nbns_reply_len = 12 + answer_name_len + 10 + 6;
+	udp_reply_len = 8 + nbns_reply_len;
+	ip_len = 20 + udp_reply_len;
+	reply_len = 14 + ip_len;
+
+	lp = net_allocate_ethernet_packet_link(net, nic, reply_len);
+	memset(lp->data, 0, reply_len);
+
+	memcpy(lp->data + 0, packet + 6, 6);
+	memcpy(lp->data + 6, net->gateway_ethernet_addr, 6);
+	lp->data[12] = 0x08;
+	lp->data[13] = 0x00;
+
+	lp->data[14] = 0x45;
+	lp->data[15] = 0x00;
+	lp->data[16] = ip_len >> 8;
+	lp->data[17] = ip_len & 0xff;
+	lp->data[18] = (net->timestamp >> 8) & 0xff;
+	lp->data[19] = net->timestamp & 0xff;
+	lp->data[22] = 0x40;
+	lp->data[23] = 17;
+	memcpy(lp->data + 26, net->gateway_ipv4_addr, 4);
+	memcpy(lp->data + 30, packet + 26, 4);
+	net_ip_checksum(lp->data + 14, 10, 20);
+
+	lp->data[34] = dstport >> 8;
+	lp->data[35] = dstport & 0xff;
+	lp->data[36] = srcport >> 8;
+	lp->data[37] = srcport & 0xff;
+	lp->data[38] = udp_reply_len >> 8;
+	lp->data[39] = udp_reply_len & 0xff;
+
+	memcpy(lp->data + 42, nbns, 12);
+	lp->data[44] = 0x85;
+	lp->data[45] = 0x00;
+	lp->data[46] = 0;
+	lp->data[47] = 0;
+	lp->data[48] = 0;
+	lp->data[49] = 1;
+
+	answer = lp->data + 42 + 12;
+	memcpy(answer, nbns + 12, answer_name_len);
+	answer[34] = 0x00;
+	answer[35] = 0x20;
+	answer[36] = 0x00;
+	answer[37] = 0x01;
+	answer[38] = 0x00;
+	answer[39] = 0x00;
+	answer[40] = 0x00;
+	answer[41] = 0x3c;
+	answer[42] = 0x00;
+	answer[43] = 0x06;
+	answer[44] = 0x00;
+	answer[45] = 0x00;
+	memcpy(answer + 46, net->gateway_ipv4_addr, 4);
+
+	net->timestamp ++;
+	return 1;
+}
+
+
 
 /*
  *  net_ip_checksum():
@@ -1456,6 +1581,9 @@ void net_ip_broadcast(struct net *net, struct nic_data *nic,
 		net_ip_broadcast_dhcp(net, nic, packet, len);
 		return;
 	}
+
+	if (net_ip_broadcast_nbns(net, nic, packet, len))
+		return;
 
 	/*  NetBSD seems to send this during shutdown:  */
 	if (packet[14] == 0x45 &&			/*  IPv4  */
