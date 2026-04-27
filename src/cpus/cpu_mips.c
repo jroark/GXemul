@@ -1963,16 +1963,24 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 			reg[COP0_ENTRYHI] = (int64_t)(int32_t)reg[COP0_ENTRYHI];
 		} else {
 			if (cpu->cd.mips.cpu_type.rev == MIPS_R4100) {
+				uint64_t badvpn2 = vaddr >> 11;
+
 				reg[COP0_CONTEXT] &=
 				    ~CONTEXT_BADVPN2_MASK_R4100;
-				reg[COP0_CONTEXT] |= ((vaddr_vpn2 <<
+				/*
+				 * VR4131 UM §5.1.4: Context.BadVPN2 is VA[31:11],
+				 * not the page-mask-adjusted TLB VPN2 used for
+				 * EntryHi matching. Linux's refill vector uses this
+				 * field to index an 8-byte PTE pair.
+				 */
+				reg[COP0_CONTEXT] |= ((badvpn2 <<
 				    CONTEXT_BADVPN2_SHIFT) &
 				    CONTEXT_BADVPN2_MASK_R4100);
 
 				/*  TODO:  fix these  */
 				reg[COP0_XCONTEXT] &= ~XCONTEXT_R_MASK;
 				reg[COP0_XCONTEXT] &= ~XCONTEXT_BADVPN2_MASK;
-				reg[COP0_XCONTEXT] |= (vaddr_vpn2 << XCONTEXT_BADVPN2_SHIFT) & XCONTEXT_BADVPN2_MASK;
+				reg[COP0_XCONTEXT] |= (badvpn2 << XCONTEXT_BADVPN2_SHIFT) & XCONTEXT_BADVPN2_MASK;
 				reg[COP0_XCONTEXT] |= ((vaddr >> 62) & 0x3) << XCONTEXT_R_SHIFT;
 
 				/*  reg[COP0_PAGEMASK] = cpu->cd.mips.coproc[0]->tlbs[0].mask & PAGEMASK_MASK;  */
