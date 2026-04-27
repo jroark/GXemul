@@ -570,9 +570,31 @@ void coproc_register_read(struct cpu *cpu,
 	if (cp->coproc_nr==0 && reg_nr==COP0_WIRED)	unimpl = 0;
 	if (cp->coproc_nr==0 && reg_nr==COP0_BADVADDR)	unimpl = 0;
 	if (cp->coproc_nr==0 && reg_nr==COP0_COUNT) {
+		uint32_t old_count = (uint32_t)cp->reg[COP0_COUNT];
+
 		/*  TODO: Increase count in a more meaningful way!  */
 		cp->reg[COP0_COUNT] = (int32_t) (cp->reg[COP0_COUNT] + 1);
 		cpu->cd.mips.count_register_read_count ++;
+
+		/*
+		 * VR4131 UM section 7.1: CP0 Compare asserts interrupt 7 when
+		 * Count reaches Compare. GXemul makes Count visibly advance
+		 * on MFC0 Count reads so tight polling loops can observe
+		 * time; keep Compare delivery synchronous with that visible
+		 * Count value, not only with the later dyntrans batch flush.
+		 */
+		if (cpu->cd.mips.compare_register_set) {
+			uint32_t count = (uint32_t)cp->reg[COP0_COUNT];
+			uint32_t compare = (uint32_t)cp->reg[COP0_COMPARE];
+			int32_t diff1 = compare - old_count;
+			int32_t diff2 = compare - count;
+
+			if (diff1 > 0 && diff2 <= 0) {
+				cpu->cd.mips.compare_countdown_cycles = 0;
+				INTERRUPT_ASSERT(cpu->cd.mips.irq_compare);
+			}
+		}
+
 		unimpl = 0;
 	}
 	if (cp->coproc_nr==0 && reg_nr==COP0_ENTRYHI)	unimpl = 0;
