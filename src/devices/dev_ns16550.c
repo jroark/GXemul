@@ -42,6 +42,7 @@
 #include "memory.h"
 #include "misc.h"
 #include "pcconnect.h"
+#include "stowaway.h"
 
 #include "thirdparty/comreg.h"
 
@@ -121,7 +122,7 @@ static void ns16550_update_modem_status(struct ns_data *d,
 	d->reg[com_msr] = new_lines | delta;
 }
 
-static int ns16550_irq_gate_open(struct ns_data *d, int pcconnect_active)
+static int ns16550_irq_gate_open(struct ns_data *d, int serial_peer_active)
 {
 	/*
 	 * PC/ISA COM ports route UART IRQ through MCR.OUT2, but the BE-300
@@ -129,9 +130,9 @@ static int ns16550_irq_gate_open(struct ns_data *d, int pcconnect_active)
 	 * through the VR4131/VRC4173 interrupt fabric instead (hardware.txt:
 	 * 191 and 200).  serial.dll leaves MCR.OUT2 clear while enabling IER
 	 * modem-status interrupts, so treating OUT2 as an external gate loses
-	 * the receive/modem interrupt edge on the PC Connect dock UART.
+	 * receive/modem interrupt edges on BE-300 serial dock peers.
 	 */
-	if (pcconnect_active && d->name && strcmp(d->name, "vrc4173siu") == 0)
+	if (serial_peer_active && d->name && strcmp(d->name, "vrc4173siu") == 0)
 		return 1;
 
 	return (d->reg[com_mcr] & MCR_IENABLE) != 0;
@@ -147,6 +148,8 @@ DEVICE_TICK(ns16550)
 	 */
 	struct ns_data *d = (struct ns_data *) extra;
 	int pcconnect_active = pcconnect_ns16550_claims(d->name);
+	int stowaway_active = !pcconnect_active && stowaway_ns16550_claims(d->name);
+	int serial_peer_active = pcconnect_active || stowaway_active;
 	int modem_pending = 0;
 	int rx_pending = 0;
 	int interrupt_pending;
@@ -157,11 +160,17 @@ DEVICE_TICK(ns16550)
 		ns16550_update_modem_status(d, pcconnect_active);
 		modem_pending = (d->reg[com_msr] &
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
+	} else if (stowaway_active) {
+		ns16550_update_tx_ready(d);
+		d->reg[com_msr] = MSR_DCD | MSR_DSR | MSR_CTS;
 	}
 
 	if (pcconnect_active && pcconnect_uart_rx_available())
 		rx_pending = 1;
-	else if (!pcconnect_active && console_charavail(d->console_handle))
+	else if (stowaway_active && stowaway_uart_rx_available())
+		rx_pending = 1;
+	else if (!pcconnect_active && !stowaway_active &&
+	    console_charavail(d->console_handle))
 		rx_pending = 1;
 
 	/*
@@ -187,7 +196,7 @@ DEVICE_TICK(ns16550)
 	interrupt_pending = iir_reason != IIR_NOPEND;
 
 	if (interrupt_pending) {
-		if (ns16550_irq_gate_open(d, pcconnect_active)) {
+		if (ns16550_irq_gate_open(d, serial_peer_active)) {
 			INTERRUPT_ASSERT(d->irq);
 			d->int_asserted = 1;
 		}
@@ -206,6 +215,7 @@ DEVICE_ACCESS(ns16550)
 	size_t i;
 	struct ns_data *d = (struct ns_data *) extra;
 	int pcconnect_active = pcconnect_ns16550_claims(d->name);
+	int stowaway_active = !pcconnect_active && stowaway_ns16550_claims(d->name);
 
 	if (writeflag == MEM_WRITE)
 		idata = memory_readmax64(cpu, data, len);
@@ -223,6 +233,8 @@ DEVICE_ACCESS(ns16550)
 	ns16550_update_tx_ready(d);
 	if (pcconnect_active)
 		ns16550_update_modem_status(d, pcconnect_active);
+	else if (stowaway_active)
+		d->reg[com_msr] = MSR_DCD | MSR_DSR | MSR_CTS;
 	else
 		d->reg[com_msr] |= MSR_DCD | MSR_DSR | MSR_CTS;
 
@@ -233,7 +245,10 @@ DEVICE_ACCESS(ns16550)
 	d->reg[com_lsr] &= ~LSR_RXRDY;
 	if (pcconnect_active && pcconnect_uart_rx_available())
 		d->reg[com_lsr] |= LSR_RXRDY;
-	else if (!pcconnect_active && console_charavail(d->console_handle))
+	else if (stowaway_active && stowaway_uart_rx_available())
+		d->reg[com_lsr] |= LSR_RXRDY;
+	else if (!pcconnect_active && !stowaway_active &&
+	    console_charavail(d->console_handle))
 		d->reg[com_lsr] |= LSR_RXRDY;
 
 	relative_addr /= d->addrmult;
@@ -264,11 +279,14 @@ DEVICE_ACCESS(ns16550)
 				console_makeavail(d->console_handle, idata);
 			else if (pcconnect_active)
 				pcconnect_uart_tx_byte(idata);
+			else if (stowaway_active)
+				stowaway_uart_tx_byte(idata);
 			else
 				console_putchar(d->console_handle, idata);
 			d->tx_interrupt_pending = 1;
 		} else {
 			int x = pcconnect_active ? pcconnect_uart_rx_pop() :
+			    stowaway_active ? stowaway_uart_rx_pop() :
 			    console_readchar(d->console_handle);
 			odata = x < 0? 0 : x;
 		}
