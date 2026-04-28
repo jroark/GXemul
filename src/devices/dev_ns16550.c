@@ -314,11 +314,8 @@ DEVICE_ACCESS(ns16550)
 
 		/*  IER:  */
 		if (writeflag == MEM_WRITE) {
-			if (stowaway_active && (idata & IER_EMSC)) {
+			if (stowaway_active && (idata & IER_EMSC))
 				stowaway_uart_note_modem_wait();
-				d->reg[com_msr] |=
-				    MSR_DDCD | MSR_DDSR | MSR_DCTS;
-			}
 			/*  This is to supress Linux' behaviour  */
 			if (idata != 0)
 				debug("[ ns16550 (%s): write to ier: 0x%02x ]"
