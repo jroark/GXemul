@@ -162,7 +162,11 @@ DEVICE_TICK(ns16550)
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
 	} else if (stowaway_active) {
 		ns16550_update_tx_ready(d);
-		d->reg[com_msr] = MSR_DCD | MSR_DSR | MSR_CTS;
+		d->reg[com_msr] = (d->reg[com_msr] &
+		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) |
+		    MSR_DCD | MSR_DSR | MSR_CTS;
+		modem_pending = (d->reg[com_msr] &
+		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
 	}
 
 	if (pcconnect_active && pcconnect_uart_rx_available())
@@ -183,7 +187,7 @@ DEVICE_TICK(ns16550)
 	else if ((d->reg[com_ier] & IER_ETXRDY) &&
 	    d->tx_interrupt_pending)
 		iir_reason = IIR_TXRDY;
-	else if (pcconnect_active && (d->reg[com_ier] & IER_EMSC) &&
+	else if (serial_peer_active && (d->reg[com_ier] & IER_EMSC) &&
 	    modem_pending)
 		iir_reason = IIR_MLSC;
 
@@ -234,7 +238,9 @@ DEVICE_ACCESS(ns16550)
 	if (pcconnect_active)
 		ns16550_update_modem_status(d, pcconnect_active);
 	else if (stowaway_active)
-		d->reg[com_msr] = MSR_DCD | MSR_DSR | MSR_CTS;
+		d->reg[com_msr] = (d->reg[com_msr] &
+		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) |
+		    MSR_DCD | MSR_DSR | MSR_CTS;
 	else
 		d->reg[com_msr] |= MSR_DCD | MSR_DSR | MSR_CTS;
 
@@ -308,6 +314,11 @@ DEVICE_ACCESS(ns16550)
 
 		/*  IER:  */
 		if (writeflag == MEM_WRITE) {
+			if (stowaway_active && (idata & IER_EMSC)) {
+				stowaway_uart_note_modem_wait();
+				d->reg[com_msr] |=
+				    MSR_DDCD | MSR_DDSR | MSR_DCTS;
+			}
 			/*  This is to supress Linux' behaviour  */
 			if (idata != 0)
 				debug("[ ns16550 (%s): write to ier: 0x%02x ]"
@@ -358,17 +369,19 @@ DEVICE_ACCESS(ns16550)
 			d->reg[com_msr] = idata;
 		} else {
 			odata = d->reg[com_msr];
-			if (pcconnect_active)
+			if (pcconnect_active || stowaway_active)
 				d->reg[com_msr] &= MSR_DCD | MSR_RI | MSR_DSR | MSR_CTS;
 			debug("[ ns16550 (%s): read from msr: 0x%02x ]\n",
 			    d->name, (int)odata);
-			if (pcconnect_active)
+			if (pcconnect_active || stowaway_active)
 				dev_ns16550_tick(cpu, d);
 		}
 		break;
 
 	case com_lctl:
 		if (writeflag == MEM_WRITE) {
+			if (stowaway_active && (idata & 0x80))
+				stowaway_uart_note_port_config();
 			d->reg[com_lctl] = idata;
 			switch (idata & 0x7) {
 			case 0:	d->databits = 5; d->stopbits = "1"; break;
@@ -410,6 +423,10 @@ DEVICE_ACCESS(ns16550)
 			d->reg[com_mcr] = idata;
 			debug("[ ns16550 (%s): write to mcr: 0x%02x ]\n",
 			    d->name, (int)idata);
+			if (stowaway_active)
+				stowaway_uart_note_modem_control(
+				    (idata & MCR_DTR) != 0,
+				    (idata & MCR_RTS) != 0);
 			if (!d->tx_interrupt_pending &&
 			    (idata & MCR_IENABLE))
 				d->tx_interrupt_pending = 1;

@@ -83,12 +83,18 @@ MACHINE_SETUP(hpcmips)
 
 		dev_vr41xx_init(machine, machine->memory, 4131);
 
-		/*  VRC4173 companion chip SIU  */
-		snprintf(tmpstr, sizeof(tmpstr), "ns16550 irq=%s.cpu[%i]"
-		    ".vrip.%i addr=0x0a008680 addr_mult=4 in_use=%i"
+		/*
+		 * VRC4173 companion chip SIU.  The BE-300 serial block is on
+		 * the companion at 0xaa008680 (hardware.txt:190), and serial
+		 * wake/CommMode status is routed through GIU0 into the VR4131
+		 * GIU path (hardware.txt:122-130), not through the VR4131
+		 * internal SIU interrupt.
+		 */
+		snprintf(tmpstr, sizeof(tmpstr),
+		    "ns16550 irq=%s.cpu[%i].vrip.%i.giu.0"
+		    " addr=0x0a008680 addr_mult=4 in_use=%i"
 		    " name2=vrc4173siu",
-		    machine->path, machine->bootstrap_cpu,
-		    VRIP_INTR_SIU, 1);
+		    machine->path, machine->bootstrap_cpu, VRIP_INTR_GIU, 1);
 		machine->main_console_handle = (size_t)
 		    device_add(machine, tmpstr);
 
@@ -496,4 +502,3 @@ MACHINE_REGISTER(hpcmips)
 
 	me->set_default_ram = machine_default_ram_hpcmips;
 }
-
