@@ -69,6 +69,7 @@
 struct vr41xx_data {
 	struct interrupt cpu_irq;		/*  Connected to MIPS irq 2  */
 	int		cpumodel;		/*  Model nr, e.g. 4121  */
+	struct machine *machine;
 
 	/*  KIU:  */
 	int		kiu_console_handle;
@@ -180,6 +181,18 @@ void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
  *  edge-triggered interrupt callback. BE-300 has exactly one VR41xx.
  */
 static struct vr41xx_data *g_vr41xx_for_edge_cb = NULL;
+
+int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
+	int day, int hour, int minute, int second)
+{
+	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
+
+	if (d == NULL || d->machine != machine || d->cpumodel != 4131)
+		return -1;
+
+	return rtc_init_from_ymdhms(&d->rtc, year, month, day, hour, minute,
+	    second);
+}
 
 /*
  *  vr41xx_on_interrupt_delivered():
@@ -1122,6 +1135,7 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 
 	CHECK_ALLOCATION(d = (struct vr41xx_data *) malloc(sizeof(struct vr41xx_data)));
 	memset(d, 0, sizeof(struct vr41xx_data));
+	d->machine = machine;
 
 	/*  Connect to MIPS irq 2:  */
 	snprintf(tmps, sizeof(tmps), "%s.cpu[%i].2",

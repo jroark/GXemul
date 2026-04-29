@@ -507,6 +507,8 @@ void dev_vga_init(struct machine *machine, struct memory *mem,
 /*  dev_vr41xx.c:  */
 struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	struct memory *mem, int cpumodel);
+int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
+	int day, int hour, int minute, int second);
 
 /*  lk201.c:  */
 struct lk201_data {
@@ -533,4 +535,3 @@ void lk201_init(struct lk201_data *d, int use_fb,
 
 
 #endif	/*  DEVICES_H  */
-
