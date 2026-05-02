@@ -74,10 +74,14 @@ MACHINE_SETUP(hpcmips)
 		machine->machine_name = strdup("Casio Cassiopeia BE-300");
 		machine->emulated_hz = 131072000;
 		hpc_fb_addr = 0x0a200000;
-		hpc_fb_xsize = 240;
-		hpc_fb_ysize = 320;
-		hpc_fb_xsize_mem = 256;
-		hpc_fb_ysize_mem = 324;  /* +4: SPL rect-fill writes row 320 */
+		hpc_fb_xsize = machine->hpcmips_fb_width ?
+		    machine->hpcmips_fb_width : 240;
+		hpc_fb_ysize = machine->hpcmips_fb_height ?
+		    machine->hpcmips_fb_height : 320;
+		hpc_fb_xsize_mem = machine->hpcmips_fb_stride ?
+		    machine->hpcmips_fb_stride : 256;
+		hpc_fb_ysize_mem = machine->hpcmips_fb_mem_height ?
+		    machine->hpcmips_fb_mem_height : 324;
 		hpc_fb_bits = 16;
 		hpc_fb_encoding = BIFB_D16_0000;
 

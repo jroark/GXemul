@@ -178,6 +178,12 @@ struct machine {
 	/*  X11/framebuffer stuff (per machine):  */
 	struct x11_md x11_md;
 
+	/*  Optional hpcmips framebuffer override. 0 values use subtype defaults. */
+	int	hpcmips_fb_width;
+	int	hpcmips_fb_height;
+	int	hpcmips_fb_stride;
+	int	hpcmips_fb_mem_height;
+
 	/*  Machine-dependent: (PROM stuff, etc.)  */
 	union {
 		struct machine_arcbios	*arc;
