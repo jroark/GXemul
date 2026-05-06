@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "console.h"
 #include "cpu.h"
@@ -71,6 +72,10 @@ struct ns_data {
 	char		parity;
 	const char	*stopbits;
 	int		tx_interrupt_pending;
+	int		pcconnect_rx_was_pending;
+	int		pcconnect_tx_irq_was_pending;
+	size_t		rx_last_count;
+	uint64_t	rx_timeout_start_ns;
 };
 
 static void ns16550_update_tx_ready(struct ns_data *d)
@@ -79,7 +84,7 @@ static void ns16550_update_tx_ready(struct ns_data *d)
 }
 
 static void ns16550_update_modem_status(struct ns_data *d,
-	int pcconnect_active)
+	int pcconnect_active, int pcconnect_rx_pending)
 {
 	unsigned char old_lines;
 	unsigned char new_lines;
@@ -100,8 +105,20 @@ static void ns16550_update_modem_status(struct ns_data *d,
 		 * COM open path from running.  Do not synthesize delta bits for
 		 * that stable level: the companion socket path reports cable
 		 * transitions via AA008004, not PC-style MSR edge inputs.
+		 *
+		 * RX wakeups are different: serial.dll enables IER_EMSC on this
+		 * companion SIU and the BE-300 OAL dispatches the dock UART via
+		 * the CommMode modem-event subsource.  Keep the stable level, but
+		 * reflect a host RX empty->non-empty edge as a modem-status delta
+		 * so IIR_MLSC is visible to serial.dll after the AA008004 modem
+		 * event.  comreg.h documents MSR delta bits as "from the last
+		 * read of the MSR", so do not recreate DCTS as a level while a
+		 * byte remains unread; the guest clears deltas by reading MSR.
 		 */
-		d->reg[com_msr] = MSR_DCD | MSR_DSR | MSR_CTS;
+		if (pcconnect_rx_pending && !d->pcconnect_rx_was_pending)
+			delta |= MSR_DCTS;
+		d->pcconnect_rx_was_pending = pcconnect_rx_pending;
+		d->reg[com_msr] = MSR_DCD | MSR_DSR | MSR_CTS | delta;
 		return;
 	} else if (pcconnect_active) {
 		new_lines = pcconnect_cable_connected() ?
@@ -120,6 +137,116 @@ static void ns16550_update_modem_status(struct ns_data *d,
 		delta |= MSR_DCTS;
 
 	d->reg[com_msr] = new_lines | delta;
+}
+
+static int ns16550_be300_companion_siu(struct ns_data *d, int pcconnect_active)
+{
+	return pcconnect_active && d->name && strcmp(d->name, "vrc4173siu") == 0;
+}
+
+static uint64_t ns16550_mono_ns(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+		return 0;
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static size_t ns16550_backend_rx_count(struct ns_data *d, int pcconnect_active,
+	int stowaway_active)
+{
+	if (pcconnect_active)
+		return pcconnect_uart_rx_count();
+	if (stowaway_active)
+		return stowaway_uart_rx_count();
+	if (console_charavail(d->console_handle))
+		return 1;
+	return 0;
+}
+
+static size_t ns16550_rx_count(struct ns_data *d, int pcconnect_active,
+	int stowaway_active)
+{
+	size_t rx_count;
+
+	rx_count = ns16550_backend_rx_count(d, pcconnect_active, stowaway_active);
+	if (rx_count == 0) {
+		d->rx_timeout_start_ns = 0;
+	} else if (d->rx_last_count == 0 || rx_count > d->rx_last_count) {
+		d->rx_timeout_start_ns = ns16550_mono_ns();
+	}
+	d->rx_last_count = rx_count;
+	return rx_count;
+}
+
+static size_t ns16550_rx_fifo_trigger(struct ns_data *d)
+{
+	if (!d->enable_fifo || !(d->fcr & FIFO_ENABLE))
+		return 1;
+
+	switch (d->fcr & FIFO_TRIGGER_14) {
+	case FIFO_TRIGGER_4:
+		return 4;
+	case FIFO_TRIGGER_8:
+		return 8;
+	case FIFO_TRIGGER_14:
+		return 14;
+	case FIFO_TRIGGER_1:
+	default:
+		return 1;
+	}
+}
+
+static uint64_t ns16550_rx_timeout_ns(struct ns_data *d, int pcconnect_active)
+{
+	uint32_t pcconnect_baud;
+	int divisor;
+
+	if (ns16550_be300_companion_siu(d, pcconnect_active)) {
+		pcconnect_baud = pcconnect_uart_baud();
+		if (pcconnect_baud == 0)
+			pcconnect_baud = 115200u;
+		/*
+		 * The BE-300 PC Connect dock is the VRC4173 companion SIU at
+		 * 0xaa008680 (hardware.txt:8, 190-191). PortMon captures open
+		 * the PC side at 115200 8N1, while serial.dll programs a
+		 * board-specific divisor, so use the bridge baud for the
+		 * 16550 receive-timeout duration instead of generic divisor math.
+		 */
+		return 40ull * 1000000000ull / pcconnect_baud;
+	}
+
+	divisor = d->divisor > 0 ? d->divisor : 12;
+	/*
+	 * comreg.h documents FIFO trigger levels but not the character-timeout
+	 * duration. Standard 16550A behavior raises a receive timeout after
+	 * roughly four character times when FIFO data is below the trigger.
+	 * Use 8N1's 10 bit-times per character and the current divisor.
+	 */
+	return (uint64_t)divisor * 40ull * 1000000000ull / 115200ull;
+}
+
+static unsigned char ns16550_rx_iir_reason(struct ns_data *d, size_t rx_count,
+	int pcconnect_active)
+{
+	uint64_t now;
+
+	if (rx_count == 0)
+		return IIR_NOPEND;
+	if (rx_count >= ns16550_rx_fifo_trigger(d))
+		return IIR_RXRDY;
+	if (!d->enable_fifo || !(d->fcr & FIFO_ENABLE))
+		return IIR_RXRDY;
+	if (d->rx_timeout_start_ns == 0)
+		return IIR_NOPEND;
+
+	now = ns16550_mono_ns();
+	if (now != 0 &&
+	    now - d->rx_timeout_start_ns >=
+	    ns16550_rx_timeout_ns(d, pcconnect_active))
+		return IIR_RXTOUT;
+	return IIR_NOPEND;
 }
 
 static int ns16550_irq_gate_open(struct ns_data *d, int serial_peer_active)
@@ -151,13 +278,20 @@ DEVICE_TICK(ns16550)
 	int stowaway_active = !pcconnect_active && stowaway_ns16550_claims(d->name);
 	int serial_peer_active = pcconnect_active || stowaway_active;
 	int modem_pending = 0;
-	int rx_pending = 0;
+	size_t rx_count;
+	int rx_data_pending;
+	unsigned char rx_iir_reason;
 	int interrupt_pending;
 	unsigned char iir_reason = IIR_NOPEND;
+	int pcconnect_tx_irq_pending;
+
+	rx_count = ns16550_rx_count(d, pcconnect_active, stowaway_active);
+	rx_data_pending = rx_count > 0;
+	rx_iir_reason = ns16550_rx_iir_reason(d, rx_count, pcconnect_active);
 
 	if (pcconnect_active) {
 		ns16550_update_tx_ready(d);
-		ns16550_update_modem_status(d, pcconnect_active);
+		ns16550_update_modem_status(d, pcconnect_active, rx_data_pending);
 		modem_pending = (d->reg[com_msr] &
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
 	} else if (stowaway_active) {
@@ -169,27 +303,61 @@ DEVICE_TICK(ns16550)
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
 	}
 
-	if (pcconnect_active && pcconnect_uart_rx_available())
-		rx_pending = 1;
-	else if (stowaway_active && stowaway_uart_rx_available())
-		rx_pending = 1;
-	else if (!pcconnect_active && !stowaway_active &&
-	    console_charavail(d->console_handle))
-		rx_pending = 1;
-
 	/*
 	 *  If interrupts are enabled, and interrupts are pending, then
 	 *  cause a CPU interrupt.
  	 */
 
-	if ((d->reg[com_ier] & IER_ERXRDY) && rx_pending)
-		iir_reason = IIR_RXRDY;
+	if (ns16550_be300_companion_siu(d, pcconnect_active) &&
+	    (d->reg[com_mcr] & (MCR_DTR | MCR_RTS)) != 0 &&
+	    (d->reg[com_ier] & IER_ETXRDY) && d->tx_interrupt_pending) {
+		/*
+		 * Once PCConnect has opened COM1, serial.dll services the
+		 * companion SIU through the VRC4173 CommMode GIRQ0-4 path
+		 * (hardware.txt:122-130, 190-191), not a plain PC ISA IRQ.
+		 * Keep THRE visible on that service edge even if the host is
+		 * concurrently polling RX; otherwise a continuous PC-side
+		 * 0x55 stream masks TXRDY and the BE-side sync train stalls.
+		 */
+		iir_reason = IIR_TXRDY;
+	}
+	else if ((d->reg[com_ier] & IER_ERXRDY) && rx_iir_reason != IIR_NOPEND)
+		iir_reason = rx_iir_reason;
+	else if (ns16550_be300_companion_siu(d, pcconnect_active) &&
+	    (d->reg[com_ier] & IER_EMSC) && rx_iir_reason != IIR_NOPEND) {
+		/*
+		 * The BE-300 companion SIU receive wake is dispatched through
+		 * the VRC4173 CommMode modem subsource (hardware.txt:122-130,
+		 * 190-191).  WinCE's serial.dll enables IER_EMSC on this path,
+		 * then expects the UART IIR to identify pending receive data;
+		 * reporting MLSC leaves the byte visible in LSR_RXRDY but
+		 * causes the IST to read only MSR forever.  For this companion
+		 * route, treat the CommMode wake enable as the RX interrupt
+		 * gate once host data is pending.
+		 */
+		iir_reason = rx_iir_reason;
+	}
 	else if ((d->reg[com_ier] & IER_ETXRDY) &&
 	    d->tx_interrupt_pending)
 		iir_reason = IIR_TXRDY;
 	else if (serial_peer_active && (d->reg[com_ier] & IER_EMSC) &&
 	    modem_pending)
 		iir_reason = IIR_MLSC;
+
+	pcconnect_tx_irq_pending =
+	    ns16550_be300_companion_siu(d, pcconnect_active) &&
+	    iir_reason == IIR_TXRDY;
+	if (pcconnect_tx_irq_pending && !d->pcconnect_tx_irq_was_pending) {
+		/*
+		 * The VRC4173 companion SIU interrupt is delivered to WinCE
+		 * through the CommMode GIRQ0-4 latch, not just the generic
+		 * ns16550 interrupt line (hardware.txt:122-130, 190-191).
+		 * Raise that companion subsource when THRE becomes the UART
+		 * IIR reason so serial.dll can drain its transmit queue.
+		 */
+		pcconnect_signal_uart_irq();
+	}
+	d->pcconnect_tx_irq_was_pending = pcconnect_tx_irq_pending;
 
 	/*
 	 * The IIR low nibble is an interrupt identification value, not a
@@ -220,6 +388,8 @@ DEVICE_ACCESS(ns16550)
 	struct ns_data *d = (struct ns_data *) extra;
 	int pcconnect_active = pcconnect_ns16550_claims(d->name);
 	int stowaway_active = !pcconnect_active && stowaway_ns16550_claims(d->name);
+	size_t rx_count;
+	int rx_data_pending;
 
 	if (writeflag == MEM_WRITE)
 		idata = memory_readmax64(cpu, data, len);
@@ -235,8 +405,12 @@ DEVICE_ACCESS(ns16550)
 	 *  Always ready to transmit:
 	 */
 	ns16550_update_tx_ready(d);
+
+	rx_count = ns16550_rx_count(d, pcconnect_active, stowaway_active);
+	rx_data_pending = rx_count > 0;
+
 	if (pcconnect_active)
-		ns16550_update_modem_status(d, pcconnect_active);
+		ns16550_update_modem_status(d, pcconnect_active, rx_data_pending);
 	else if (stowaway_active)
 		d->reg[com_msr] = (d->reg[com_msr] &
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) |
@@ -249,12 +423,7 @@ DEVICE_ACCESS(ns16550)
 		d->reg[com_iir] |= ((d->fcr << 5) & 0xc0);
 
 	d->reg[com_lsr] &= ~LSR_RXRDY;
-	if (pcconnect_active && pcconnect_uart_rx_available())
-		d->reg[com_lsr] |= LSR_RXRDY;
-	else if (stowaway_active && stowaway_uart_rx_available())
-		d->reg[com_lsr] |= LSR_RXRDY;
-	else if (!pcconnect_active && !stowaway_active &&
-	    console_charavail(d->console_handle))
+	if (rx_data_pending)
 		d->reg[com_lsr] |= LSR_RXRDY;
 
 	relative_addr /= d->addrmult;
@@ -289,6 +458,8 @@ DEVICE_ACCESS(ns16550)
 				stowaway_uart_tx_byte(idata);
 			else
 				console_putchar(d->console_handle, idata);
+			if (pcconnect_active)
+				d->pcconnect_tx_irq_was_pending = 0;
 			d->tx_interrupt_pending = 1;
 		} else {
 			int x = pcconnect_active ? pcconnect_uart_rx_pop() :
@@ -323,8 +494,11 @@ DEVICE_ACCESS(ns16550)
 
 			/*  Needed for NetBSD 2.0.x, but not 1.6.2?  */
 			if (!(d->reg[com_ier] & IER_ETXRDY) &&
-			    (idata & IER_ETXRDY))
+			    (idata & IER_ETXRDY)) {
+				if (pcconnect_active)
+					d->pcconnect_tx_irq_was_pending = 0;
 				d->tx_interrupt_pending = 1;
+			}
 
 			d->reg[com_ier] = idata;
 			dev_ns16550_tick(cpu, d);
@@ -336,7 +510,25 @@ DEVICE_ACCESS(ns16550)
 		if (writeflag == MEM_WRITE) {
 			debug("[ ns16550 (%s): write to fifo control: 0x%02x ]"
 			    "\n", d->name, (int)idata);
-			d->fcr = idata;
+			/*
+			 * comreg.h defines FIFO_RCV_RST/FIFO_XMT_RST as FIFO
+			 * reset controls.  They are self-clearing command bits;
+			 * the BE-300 serial peers keep their receive queues
+			 * outside this generic ns16550 model, so flush them here
+			 * when serial.dll resets the UART during COM open.
+			 */
+			if (idata & FIFO_RCV_RST) {
+				if (pcconnect_active)
+					pcconnect_uart_rx_clear();
+				else if (stowaway_active)
+					stowaway_uart_rx_clear();
+			}
+			if (idata & FIFO_XMT_RST)
+				d->tx_interrupt_pending = 0;
+			if (pcconnect_active)
+				d->pcconnect_tx_irq_was_pending = 0;
+			d->fcr = idata & ~(FIFO_RCV_RST | FIFO_XMT_RST);
+			dev_ns16550_tick(cpu, d);
 		} else {
 			odata = d->reg[com_iir];
 			if ((d->reg[com_iir] & IIR_IMASK) == IIR_TXRDY)
