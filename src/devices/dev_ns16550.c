@@ -295,10 +295,20 @@ DEVICE_TICK(ns16550)
 		modem_pending = (d->reg[com_msr] &
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
 	} else if (stowaway_active) {
+		unsigned char delta = d->reg[com_msr] &
+		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS);
+
+		/*
+		 * Stowaway.dll's Net-image idle path lowers DTR but leaves the
+		 * companion SIU armed for modem-status wake.  A physical serial
+		 * keyboard keypress produces a modem transition along with RX
+		 * data; expose the one-shot CTS delta while preserving normal
+		 * DCD/DSR/CTS levels.
+		 */
+		if (stowaway_uart_take_modem_delta())
+			delta |= MSR_DCTS;
 		ns16550_update_tx_ready(d);
-		d->reg[com_msr] = (d->reg[com_msr] &
-		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) |
-		    MSR_DCD | MSR_DSR | MSR_CTS;
+		d->reg[com_msr] = delta | MSR_DCD | MSR_DSR | MSR_CTS;
 		modem_pending = (d->reg[com_msr] &
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
 	}
@@ -425,11 +435,19 @@ DEVICE_ACCESS(ns16550)
 
 	if (pcconnect_active)
 		ns16550_update_modem_status(d, pcconnect_active, rx_data_pending);
-	else if (stowaway_active)
-		d->reg[com_msr] = (d->reg[com_msr] &
-		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) |
-		    MSR_DCD | MSR_DSR | MSR_CTS;
-	else
+	else if (stowaway_active) {
+		unsigned char delta = d->reg[com_msr] &
+		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS);
+
+		/*
+		 * Keep the access path consistent with DEVICE_TICK: sleeping
+		 * Stowaway drivers can be woken by a one-shot modem delta from
+		 * the keyboard backend.
+		 */
+		if (stowaway_uart_take_modem_delta())
+			delta |= MSR_DCTS;
+		d->reg[com_msr] = delta | MSR_DCD | MSR_DSR | MSR_CTS;
+	} else
 		d->reg[com_msr] |= MSR_DCD | MSR_DSR | MSR_CTS;
 
 	d->reg[com_iir] &= ~0xf0;
