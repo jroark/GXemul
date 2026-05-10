@@ -323,6 +323,20 @@ DEVICE_TICK(ns16550)
 	}
 	else if ((d->reg[com_ier] & IER_ERXRDY) && rx_iir_reason != IIR_NOPEND)
 		iir_reason = rx_iir_reason;
+	else if (stowaway_active && d->name &&
+	    strcmp(d->name, "vrc4173siu") == 0 &&
+	    (d->reg[com_ier] & IER_EMSC) && rx_data_pending) {
+		/*
+		 * The BE-300 dock serial port is the VRC4173 companion SIU
+		 * behind the Vic/CommMode block (docs/hardware/hardware.txt:
+		 * 190-191).  Stowaway.dll enables modem-status wake on this
+		 * path and expects its two-byte 0xfa 0xfd probe ACK to be
+		 * visible immediately; the generic FIFO trigger can be four
+		 * bytes, so waiting for the normal RX threshold hides the ACK
+		 * until the driver times out and resets the FIFO.
+		 */
+		iir_reason = IIR_RXRDY;
+	}
 	else if (ns16550_be300_companion_siu(d, pcconnect_active) &&
 	    (d->reg[com_ier] & IER_EMSC) && rx_iir_reason != IIR_NOPEND) {
 		/*
