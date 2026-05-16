@@ -43,6 +43,7 @@
 #include "memory.h"
 #include "misc.h"
 #include "pcconnect.h"
+#include "pcconnect_bridge.h"
 #include "stowaway.h"
 
 #include "thirdparty/comreg.h"
@@ -154,23 +155,26 @@ static uint64_t ns16550_mono_ns(void)
 }
 
 static size_t ns16550_backend_rx_count(struct ns_data *d, int pcconnect_active,
-	int stowaway_active)
+	int stowaway_active, int serial_bridge_active)
 {
 	if (pcconnect_active)
 		return pcconnect_uart_rx_count();
 	if (stowaway_active)
 		return stowaway_uart_rx_count();
+	if (serial_bridge_active)
+		return serial_bridge_uart_rx_count(d->name);
 	if (console_charavail(d->console_handle))
 		return 1;
 	return 0;
 }
 
 static size_t ns16550_rx_count(struct ns_data *d, int pcconnect_active,
-	int stowaway_active)
+	int stowaway_active, int serial_bridge_active)
 {
 	size_t rx_count;
 
-	rx_count = ns16550_backend_rx_count(d, pcconnect_active, stowaway_active);
+	rx_count = ns16550_backend_rx_count(d, pcconnect_active,
+	    stowaway_active, serial_bridge_active);
 	if (rx_count == 0) {
 		d->rx_timeout_start_ns = 0;
 	} else if (d->rx_last_count == 0 || rx_count > d->rx_last_count) {
@@ -249,7 +253,8 @@ static unsigned char ns16550_rx_iir_reason(struct ns_data *d, size_t rx_count,
 	return IIR_NOPEND;
 }
 
-static int ns16550_irq_gate_open(struct ns_data *d, int serial_peer_active)
+static int ns16550_irq_gate_open(struct ns_data *d, int serial_peer_active,
+	int serial_bridge_active)
 {
 	/*
 	 * PC/ISA COM ports route UART IRQ through MCR.OUT2, but the BE-300
@@ -257,9 +262,14 @@ static int ns16550_irq_gate_open(struct ns_data *d, int serial_peer_active)
 	 * through the VR4131/VRC4173 interrupt fabric instead (hardware.txt:
 	 * 191 and 200).  serial.dll leaves MCR.OUT2 clear while enabling IER
 	 * modem-status interrupts, so treating OUT2 as an external gate loses
-	 * receive/modem interrupt edges on BE-300 serial dock peers.
+	 * receive/modem interrupt edges on BE-300 serial dock peers. The same
+	 * applies to Linux-mode serial_bridge consumers: both the VR4131 main
+	 * SIU and VRC4173 companion SIU are MMIO UARTs with IRQs routed via the
+	 * VR4131/VRC4173 ICU, so MCR.OUT2 is not the gate.
 	 */
 	if (serial_peer_active && d->name && strcmp(d->name, "vrc4173siu") == 0)
+		return 1;
+	if (serial_bridge_active)
 		return 1;
 
 	return (d->reg[com_mcr] & MCR_IENABLE) != 0;
@@ -276,6 +286,8 @@ DEVICE_TICK(ns16550)
 	struct ns_data *d = (struct ns_data *) extra;
 	int pcconnect_active = pcconnect_ns16550_claims(d->name);
 	int stowaway_active = !pcconnect_active && stowaway_ns16550_claims(d->name);
+	int serial_bridge_active = !pcconnect_active && !stowaway_active &&
+	    serial_bridge_ns16550_claims(d->name);
 	int serial_peer_active = pcconnect_active || stowaway_active;
 	int modem_pending = 0;
 	size_t rx_count;
@@ -285,7 +297,8 @@ DEVICE_TICK(ns16550)
 	unsigned char iir_reason = IIR_NOPEND;
 	int pcconnect_tx_irq_pending;
 
-	rx_count = ns16550_rx_count(d, pcconnect_active, stowaway_active);
+	rx_count = ns16550_rx_count(d, pcconnect_active, stowaway_active,
+	    serial_bridge_active);
 	rx_data_pending = rx_count > 0;
 	rx_iir_reason = ns16550_rx_iir_reason(d, rx_count, pcconnect_active);
 
@@ -392,7 +405,7 @@ DEVICE_TICK(ns16550)
 	interrupt_pending = iir_reason != IIR_NOPEND;
 
 	if (interrupt_pending) {
-		if (ns16550_irq_gate_open(d, serial_peer_active)) {
+		if (ns16550_irq_gate_open(d, serial_peer_active, serial_bridge_active)) {
 			INTERRUPT_ASSERT(d->irq);
 			d->int_asserted = 1;
 		}
@@ -412,6 +425,8 @@ DEVICE_ACCESS(ns16550)
 	struct ns_data *d = (struct ns_data *) extra;
 	int pcconnect_active = pcconnect_ns16550_claims(d->name);
 	int stowaway_active = !pcconnect_active && stowaway_ns16550_claims(d->name);
+	int serial_bridge_active = !pcconnect_active && !stowaway_active &&
+	    serial_bridge_ns16550_claims(d->name);
 	size_t rx_count;
 	int rx_data_pending;
 
@@ -430,7 +445,8 @@ DEVICE_ACCESS(ns16550)
 	 */
 	ns16550_update_tx_ready(d);
 
-	rx_count = ns16550_rx_count(d, pcconnect_active, stowaway_active);
+	rx_count = ns16550_rx_count(d, pcconnect_active, stowaway_active,
+	    serial_bridge_active);
 	rx_data_pending = rx_count > 0;
 
 	if (pcconnect_active)
@@ -488,6 +504,8 @@ DEVICE_ACCESS(ns16550)
 				pcconnect_uart_tx_byte(idata);
 			else if (stowaway_active)
 				stowaway_uart_tx_byte(idata);
+			else if (serial_bridge_active)
+				serial_bridge_uart_tx_byte(d->name, idata);
 			else
 				console_putchar(d->console_handle, idata);
 			if (pcconnect_active)
@@ -496,6 +514,8 @@ DEVICE_ACCESS(ns16550)
 		} else {
 			int x = pcconnect_active ? pcconnect_uart_rx_pop() :
 			    stowaway_active ? stowaway_uart_rx_pop() :
+			    serial_bridge_active ?
+			        serial_bridge_uart_rx_pop(d->name) :
 			    console_readchar(d->console_handle);
 			odata = x < 0? 0 : x;
 		}
@@ -554,6 +574,8 @@ DEVICE_ACCESS(ns16550)
 					pcconnect_uart_rx_clear();
 				else if (stowaway_active)
 					stowaway_uart_rx_clear();
+				else if (serial_bridge_active)
+					serial_bridge_uart_rx_clear(d->name);
 			}
 			if (idata & FIFO_XMT_RST)
 				d->tx_interrupt_pending = 0;
