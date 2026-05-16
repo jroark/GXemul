@@ -31,7 +31,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <sys/mman.h>
+#endif
 #include <string.h>
 
 #include "cpu.h"
@@ -164,9 +168,13 @@ void cpu_destroy(struct cpu *cpu)
 	if (cpu->path != NULL)
 		free(cpu->path);
 
+#ifdef _WIN32
+	free(cpu);
+#else
 	/*  TODO: This assumes that zeroed_alloc() actually succeeded
 	    with using mmap(), and not malloc()!  */
 	munmap((void *)cpu, sizeof(struct cpu));
+#endif
 }
 
 
@@ -573,4 +581,3 @@ void cpu_init(void)
 {
 	ADD_ALL_CPU_FAMILIES;
 }
-

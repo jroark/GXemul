@@ -39,6 +39,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <unistd.h>
 #include <errno.h>
 #include <sys/types.h>
@@ -48,10 +51,26 @@
 #include <netdb.h>
 #include <fcntl.h>
 #include <signal.h>
+#endif
+#include <errno.h>
 
 #include "machine.h"
 #include "misc.h"
 #include "net.h"
+
+#ifdef _WIN32
+static void gx_socket_set_nonblocking(gxemul_socket_t s)
+{
+	u_long mode = 1;
+	ioctlsocket((SOCKET)s, FIONBIO, &mode);
+}
+#else
+static void gx_socket_set_nonblocking(gxemul_socket_t s)
+{
+	int res = fcntl((int)s, F_GETFL);
+	fcntl((int)s, F_SETFL, res | O_NONBLOCK);
+}
+#endif
 
 
 /*
@@ -572,7 +591,7 @@ static void parse_resolvconf(struct net *net)
 				p++;
 			*p = '\0';
 
-#ifdef HAVE_INET_PTON
+#if defined(HAVE_INET_PTON) || defined(_WIN32)
 			res = inet_pton(AF_INET, buf + start,
 			    &net->nameserver_ipv4);
 #else
@@ -765,7 +784,7 @@ struct net *net_init(struct emul *emul, int init_flags,
 		return net;
 	}
 
-#ifdef HAVE_INET_PTON
+#if defined(HAVE_INET_PTON) || defined(_WIN32)
 	res = inet_pton(AF_INET, ipv4addr, &net->netmask_ipv4);
 #else
 	res = inet_aton(ipv4addr, &net->netmask_ipv4);
@@ -813,8 +832,7 @@ struct net *net_init(struct emul *emul, int init_flags,
 		}
 
 		/*  Set the socket to non-blocking:  */
-		res = fcntl(net->local_port_socket, F_GETFL);
-		fcntl(net->local_port_socket, F_SETFL, res | O_NONBLOCK);
+		gx_socket_set_nonblocking(net->local_port_socket);
 	}
 	if (n_remote != 0) {
 		struct remote_net *rnp;
@@ -863,8 +881,9 @@ struct net *net_init(struct emul *emul, int init_flags,
 	net_dumpinfo(net);
 
 	/*  This is necessary when using the real network:  */
+#ifdef SIGPIPE
 	signal(SIGPIPE, SIG_IGN);
+#endif
 
 	return net;
 }
-

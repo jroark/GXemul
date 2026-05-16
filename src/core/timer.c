@@ -32,8 +32,12 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <unistd.h>
 #include <sys/time.h>
+#endif
 
 #include "misc.h"
 #include "timer.h"
@@ -256,8 +260,10 @@ void timer_tick_manual(void)
 void timer_start(void)
 {
 	struct timer *timer = first_timer;
+#ifndef _WIN32
 	struct itimerval val;
 	struct sigaction saction;
+#endif
 
 	if (timer_is_running)
 		return;
@@ -272,6 +278,9 @@ void timer_start(void)
 		timer->next_tick_at = timer->interval;
 		timer = timer->next;
 	}
+#ifdef _WIN32
+	return;
+#else
 	val.it_interval.tv_sec = 0;
 	val.it_interval.tv_usec = (int) (1000000.0 / timer_freq);
 	val.it_value.tv_sec = 0;
@@ -284,6 +293,7 @@ void timer_start(void)
 	sigaction(SIGALRM, &saction, NULL);
 
 	setitimer(ITIMER_REAL, &val, NULL);
+#endif
 }
 
 
@@ -294,14 +304,19 @@ void timer_start(void)
  */
 void timer_stop(void)
 {
+#ifndef _WIN32
 	struct itimerval val;
 	struct sigaction saction;
+#endif
 
 	if (!timer_is_running)
 		return;
 
 	timer_is_running = 0;
 
+#ifdef _WIN32
+	return;
+#else
 	val.it_interval.tv_sec = 0;
 	val.it_interval.tv_usec = 0;
 	val.it_value.tv_sec = 0;
@@ -313,6 +328,7 @@ void timer_stop(void)
 	saction.sa_handler = NULL;
 
 	sigaction(SIGALRM, &saction, NULL);
+#endif
 }
 
 
@@ -348,4 +364,3 @@ void timer_init(void)
 		sleep(999999);
 #endif
 }
-

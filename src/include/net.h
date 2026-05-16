@@ -32,9 +32,16 @@
  */
 
 #include <stdbool.h>
+#ifdef _WIN32
+#include <stdint.h>
+#include "win32_compat.h"
+typedef intptr_t gxemul_socket_t;
+#else
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+typedef int gxemul_socket_t;
+#endif
 
 struct emul;
 struct ethernet_packet_link;
@@ -76,7 +83,7 @@ struct udp_connection {
 
 	/*  Outside:  */
 	int		udp_id;
-	int		socket;
+	gxemul_socket_t	socket;
 	unsigned char	outside_ip_address[4];
 	int		outside_udp_port;
 };
@@ -105,7 +112,7 @@ struct tcp_connection {
 	/*  Outside:  */
 	int		state;
 	int		tcp_id;
-	int		socket;
+	gxemul_socket_t	socket;
 	unsigned char	outside_ip_address[4];
 	int		outside_tcp_port;
 	uint32_t	outside_timestamp;
@@ -160,7 +167,7 @@ struct net {
 
 	/*  Distributed network:  */
 	int		local_port;
-	int		local_port_socket;
+	gxemul_socket_t	local_port_socket;
 	struct remote_net *remote_nets;
 };
 

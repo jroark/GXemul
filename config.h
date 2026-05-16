@@ -18,6 +18,12 @@
 
 #define HOST_LITTLE_ENDIAN
 
+#ifdef _WIN32
+#define strlcpy mystrlcpy
+#define strlcat mystrlcat
+#define USE_STRLCPY_REPLACEMENTS
+#endif
+
 #undef mips
 
 #endif  /*  CONFIG_H  */

@@ -29,7 +29,9 @@
  */
 
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/mman.h>
+#endif
 
 
 /*
@@ -144,5 +146,4 @@ int memory_cache_R3000(struct cpu *cpu, int cache, uint64_t paddr,
 
 #define TRANSLATE_ADDRESS	translate_v2p_generic
 #include "memory_mips_v2p.c"
-
 

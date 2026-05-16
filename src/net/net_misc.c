@@ -32,10 +32,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#endif
 
 #include "machine.h"
 #include "misc.h"
@@ -120,7 +124,7 @@ void net_generate_unique_mac(struct machine *machine, unsigned char *macbuf)
  */
 void send_udp(struct in_addr *addrp, int portnr, unsigned char *packet, size_t len)
 {
-	int s;
+	gxemul_socket_t s;
 	struct sockaddr_in si;
 
 	s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -140,6 +144,9 @@ void send_udp(struct in_addr *addrp, int portnr, unsigned char *packet, size_t l
 		perror("send_udp(): sendto");
 	}
 
-	close(s);
+#ifdef _WIN32
+	closesocket((SOCKET)s);
+#else
+	close((int)s);
+#endif
 }
-

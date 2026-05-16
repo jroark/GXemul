@@ -32,16 +32,76 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <unistd.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <errno.h>
 #include <fcntl.h>
+#endif
+#include <errno.h>
 
 #include "misc.h"
 #include "net.h"
+
+#ifdef _WIN32
+static void gx_socket_close(gxemul_socket_t s)
+{
+	closesocket((SOCKET)s);
+}
+
+static void gx_socket_set_nonblocking(gxemul_socket_t s)
+{
+	u_long mode = 1;
+	ioctlsocket((SOCKET)s, FIONBIO, &mode);
+}
+
+static int gx_socket_write(gxemul_socket_t s, const void *buf, size_t len)
+{
+	return send((SOCKET)s, (const char *)buf, (int)len, 0);
+}
+
+static int gx_socket_read(gxemul_socket_t s, void *buf, size_t len)
+{
+	return recv((SOCKET)s, (char *)buf, (int)len, 0);
+}
+
+static int gx_socket_would_block(void)
+{
+	int err = WSAGetLastError();
+	return err == WSAEWOULDBLOCK || err == WSAEINPROGRESS ||
+	    err == WSAEALREADY;
+}
+#else
+static void gx_socket_close(gxemul_socket_t s)
+{
+	close((int)s);
+}
+
+static void gx_socket_set_nonblocking(gxemul_socket_t s)
+{
+	int res = fcntl((int)s, F_GETFL);
+	fcntl((int)s, F_SETFL, res | O_NONBLOCK);
+}
+
+static int gx_socket_write(gxemul_socket_t s, const void *buf, size_t len)
+{
+	return write((int)s, buf, len);
+}
+
+static int gx_socket_read(gxemul_socket_t s, void *buf, size_t len)
+{
+	return read((int)s, buf, len);
+}
+
+static int gx_socket_would_block(void)
+{
+	return errno == EAGAIN || errno == EWOULDBLOCK;
+}
+#endif
 
 
 /*  #define debug fatal  */
@@ -505,7 +565,7 @@ static void net_ip_icmp(struct net *net, struct nic_data *nic,
  */
 static void tcp_closeconnection(struct net *net, int con_id)
 {
-	close(net->tcp_connections[con_id].socket);
+	gx_socket_close(net->tcp_connections[con_id].socket);
 	net->tcp_connections[con_id].state = TCP_OUTSIDE_DISCONNECTED;
 	net->tcp_connections[con_id].in_use = 0;
 	net->tcp_connections[con_id].incoming_buf_len = 0;
@@ -854,9 +914,7 @@ static void net_ip_tcp(struct net *net, struct nic_data *nic,
 		net->tcp_connections[con_id].in_use = 1;
 
 		/*  Set the socket to non-blocking:  */
-		res = fcntl(net->tcp_connections[con_id].socket, F_GETFL);
-		fcntl(net->tcp_connections[con_id].socket, F_SETFL,
-		    res | O_NONBLOCK);
+		gx_socket_set_nonblocking(net->tcp_connections[con_id].socket);
 
 		remote_ip.sin_family = AF_INET;
 		memcpy((unsigned char *)&remote_ip.sin_addr,
@@ -1000,12 +1058,12 @@ debug("  all acked\n");
 			goto ret;
 		}
 
-		res = write(net->tcp_connections[con_id].socket,
+		res = gx_socket_write(net->tcp_connections[con_id].socket,
 		    packet + send_ofs, len - send_ofs);
 
 		if (res > 0) {
 			net->tcp_connections[con_id].outside_acknr += res;
-		} else if (errno == EAGAIN) {
+		} else if (gx_socket_would_block()) {
 			/*  Just ignore this attempt.  */
 			return;
 		} else {
@@ -1106,7 +1164,7 @@ static void net_ip_udp(struct net *net, struct nic_data *nic,
 					free_con_id = j;
 				}
 
-			close(net->udp_connections[free_con_id].socket);
+			gx_socket_close(net->udp_connections[free_con_id].socket);
 		}
 		con_id = free_con_id;
 		memset(&net->udp_connections[con_id], 0,
@@ -1134,9 +1192,7 @@ static void net_ip_udp(struct net *net, struct nic_data *nic,
 		net->udp_connections[con_id].in_use = 1;
 
 		/*  Set the socket to non-blocking:  */
-		res = fcntl(net->udp_connections[con_id].socket, F_GETFL);
-		fcntl(net->udp_connections[con_id].socket, F_SETFL,
-		    res | O_NONBLOCK);
+		gx_socket_set_nonblocking(net->udp_connections[con_id].socket);
 	}
 
 	debug(", connection id %i\n", con_id);
@@ -1911,7 +1967,7 @@ void net_tcp_rx_avail(struct net *net, struct nic_data *nic)
 		if (res2 < 1)
 			continue;
 
-		res = read(net->tcp_connections[con_id].socket, buf, 1400);
+		res = gx_socket_read(net->tcp_connections[con_id].socket, buf, 1400);
 		if (res > 0) {
 			/*  debug("\n -{- %lli -}-\n", (long long)res);  */
 			net->tcp_connections[con_id].incoming_buf_len = res;

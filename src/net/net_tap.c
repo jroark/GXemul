@@ -38,6 +38,38 @@
  *  then all of the virtual IP network support is bypassed completely.
  */
 
+#ifdef _WIN32
+
+#include <stdbool.h>
+#include <stdio.h>
+
+#include "misc.h"
+#include "net.h"
+
+void net_tap_rx_avail(struct net *net)
+{
+	(void)net;
+}
+
+void net_tap_tx(struct net *net, struct nic_data *nic, unsigned char *packet,
+	int len)
+{
+	(void)net;
+	(void)nic;
+	(void)packet;
+	(void)len;
+}
+
+bool net_tap_init(struct net *net, const char *tapdev)
+{
+	(void)net;
+	fprintf(stderr, "tap networking is unsupported on Windows: %s\n",
+	    tapdev ? tapdev : "(null)");
+	return false;
+}
+
+#else
+
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <errno.h>
@@ -188,3 +220,4 @@ bool net_tap_init(struct net *net, const char *tapdev)
 	return true;
 }
 
+#endif /* _WIN32 */

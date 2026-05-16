@@ -32,7 +32,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <sys/mman.h>
+#endif
 
 #include "cpu.h"
 #include "machine.h"
@@ -117,6 +121,12 @@ void memory_writemax64(struct cpu *cpu, unsigned char *buf, int len,
  */
 void *zeroed_alloc(size_t s)
 {
+#ifdef _WIN32
+	void *p;
+
+	CHECK_ALLOCATION(p = calloc(1, s));
+	return p;
+#else
 	void *p = mmap(NULL, s, PROT_READ | PROT_WRITE,
 	    MAP_ANON | MAP_PRIVATE, -1, 0);
 
@@ -134,6 +144,7 @@ void *zeroed_alloc(size_t s)
 	}
 
 	return p;
+#endif
 }
 
 
@@ -167,8 +178,12 @@ struct memory *memory_new(uint64_t physical_max)
 
 	s = entries_per_pagetable * sizeof(void *);
 
+#ifdef _WIN32
+	mem->pagetable = (unsigned char *) calloc(1, s);
+#else
 	mem->pagetable = (unsigned char *) mmap(NULL, s,
 	    PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+#endif
 	if (mem->pagetable == NULL) {
 		CHECK_ALLOCATION(mem->pagetable = malloc(s));
 		memset(mem->pagetable, 0, s);
@@ -527,8 +542,12 @@ unsigned char *memory_paddr_to_hostaddr(struct memory *mem,
 
 		/*  Anonymous mmap() should return zero-filled memory,
 		    try malloc + memset if mmap failed.  */
+#ifdef _WIN32
+		table[entry] = calloc(1, alloclen);
+#else
 		table[entry] = (void *) mmap(NULL, alloclen,
 		    PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+#endif
 		if (table[entry] == NULL) {
 			CHECK_ALLOCATION(table[entry] = malloc(alloclen));
 			memset(table[entry], 0, alloclen);
@@ -964,4 +983,3 @@ void store_16bit_word_in_host(struct cpu *cpu,
 		int tmp = data[0]; data[0] = data[1]; data[1] = tmp;
 	}
 }
-

@@ -65,10 +65,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <termios.h>
 #include <unistd.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#endif
 #include <sys/types.h>
 #include <time.h>
 
@@ -83,12 +87,14 @@ extern int verbose;
 extern struct settings *global_settings;
 
 
+#ifndef _WIN32
 static struct termios console_oldtermios;
 static struct termios console_curtermios;
 
 /*  For 'slave' mode:  */
 static struct termios console_slave_tios;
 static int console_slave_outputd;
+#endif
 
 static int console_initialized = 0;
 static struct settings *console_settings = NULL;
@@ -145,8 +151,10 @@ void console_deinit_main(void)
 	if (!console_initialized)
 		return;
 
+#ifndef _WIN32
 	if (console_is_tty)
 		tcsetattr(STDIN_FILENO, TCSANOW, &console_oldtermios);
+#endif
 
 	console_initialized = 0;
 }
@@ -163,6 +171,10 @@ void console_deinit_main(void)
  */
 void console_sigcont(int x)
 {
+#ifdef _WIN32
+	(void)x;
+	return;
+#else
 	if (!console_initialized || !console_is_tty)
 		return;
 
@@ -171,6 +183,7 @@ void console_sigcont(int x)
 
 	/*  Reset the signal handler:  */
 	signal(SIGCONT, console_sigcont);
+#endif
 }
 
 
@@ -185,6 +198,11 @@ void console_sigcont(int x)
  */
 static void start_xterm(int handle)
 {
+#ifdef _WIN32
+	(void)handle;
+	printf("[ start_xterm(): slave consoles are unsupported on Windows ]\n");
+	return;
+#else
 	int filedes[2];
 	int filedesB[2];
 	int res;
@@ -271,6 +289,7 @@ static void start_xterm(int handle)
 
 	console_handles[handle].w_descriptor = filedes[1];
 	console_handles[handle].r_descriptor = filedesB[0];
+#endif
 }
 
 
@@ -281,6 +300,11 @@ static void start_xterm(int handle)
  */
 static int d_avail(int d)
 {
+#ifdef _WIN32
+	if (d == STDIN_FILENO)
+		return _kbhit() ? 1 : 0;
+	return 0;
+#else
 	fd_set rfds;
 	struct timeval tv;
 	int retries = 0;
@@ -300,6 +324,7 @@ static int d_avail(int d)
 		if (errno != EINTR || ++retries > 3)
 			return 0;
 	}
+#endif
 }
 
 
@@ -381,7 +406,17 @@ int console_charavail(int handle)
 		else
 			d = console_handles[handle].r_descriptor;
 
+#ifdef _WIN32
+		if (!allow_slaves && d == STDIN_FILENO) {
+			int c = _getch();
+			len = c < 0 ? 0 : 1;
+			ch[0] = (unsigned char)c;
+		} else {
+			len = 0;
+		}
+#else
 		len = read(d, ch, sizeof(ch));
+#endif
 
 		if (len <= 0) {
 			/* EOF or error: stop polling this descriptor. */
@@ -495,6 +530,11 @@ void console_putchar(int handle, int ch)
 		return;
 	}
 
+#ifdef _WIN32
+	putchar(ch);
+	console_stdout_pending = ch == '\n' ? 0 : 1;
+	return;
+#else
 	if (!console_handles[handle].in_use) {
 		printf("[ console_putchar(): handle %i not in"
 		    " use! ]\n", handle);
@@ -508,6 +548,7 @@ void console_putchar(int handle, int ch)
 	buf[0] = ch;
 	if (write(console_handles[handle].w_descriptor, buf, 1) != 1)
 		perror("error writing to console handle");
+#endif
 }
 
 
@@ -580,6 +621,7 @@ void console_getmouse(int *dx, int *dy, int *buttons, int *fb_nr)
 /*
  *  console_slave_sigint():
  */
+#ifndef _WIN32
 static void console_slave_sigint(int x)
 {
 	char buf[1];
@@ -670,6 +712,14 @@ void console_slave(const char *arg)
 		usleep(10000);
 	}
 }
+#else
+void console_slave(const char *arg)
+{
+	(void)arg;
+	printf("console_slave(): unsupported on Windows\n");
+	exit(1);
+}
+#endif
 
 
 /*
@@ -858,13 +908,18 @@ int console_change_inputability(int handle, int inputability)
  */
 void console_init_main(struct emul *emul)
 {
+#ifdef _WIN32
+	(void)emul;
+#else
 	int i, tra;
+#endif
 
 	if (console_initialized)
 		return;
 
 	console_is_tty = isatty(STDIN_FILENO);
 
+#ifndef _WIN32
 	if (console_is_tty) {
 		tcgetattr(STDIN_FILENO, &console_oldtermios);
 		memcpy(&console_curtermios, &console_oldtermios,
@@ -895,6 +950,7 @@ void console_init_main(struct emul *emul)
 
 		tcsetattr(STDIN_FILENO, TCSANOW, &console_curtermios);
 	}
+#endif
 
 	/*  Force line-buffered stdout when redirected to a file.  */
 	if (!isatty(STDOUT_FILENO))
@@ -1073,4 +1129,3 @@ void console_deinit(void)
 	settings_remove(console_settings, "allow_slaves");
 	settings_remove(global_settings, "console");
 }
-

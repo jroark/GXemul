@@ -34,7 +34,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <sys/mman.h>
+#endif
 
 #include "cpu.h"
 #include "devices.h"
@@ -206,8 +210,12 @@ void dev_ram_init(struct machine *machine, uint64_t baseaddr, uint64_t length,
 		 *  can be slow for large chunks of memory.
 		 */
 		d->length = length;
+#ifdef _WIN32
+		d->data = (unsigned char *) calloc(1, length);
+#else
 		d->data = (unsigned char *) mmap(NULL, length,
 		    PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+#endif
 		if (d->data == NULL) {
 			CHECK_ALLOCATION(d->data = (unsigned char *) malloc(length));
 			memset(d->data, 0, length);
@@ -229,4 +237,3 @@ void dev_ram_init(struct machine *machine, uint64_t baseaddr, uint64_t length,
 		exit(1);
 	}
 }
-
