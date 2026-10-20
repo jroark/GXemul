@@ -66,7 +66,7 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 
 /*  Sign-extend a value with 'bits' significant bits  */
 #define	SIGN_EXTEND(val, bits)	\
-	((int32_t)((val) << (32 - (bits))) >> (32 - (bits)))
+	((int32_t)((uint32_t)(val) << (32 - (bits))) >> (32 - (bits)))
 
 /*  Regnames, for disassembly trace output  */
 static const char *regnames[] = MIPS_REGISTER_NAMES;
@@ -1137,8 +1137,6 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    ((extend_word >> 5) & 0x3f) << 5 |
 				    (iw & 0x1f);
 				offset5 = SIGN_EXTEND(offset5, 16);
-			} else {
-				offset5 = SIGN_EXTEND(offset5, 5);
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
@@ -1159,7 +1157,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    (iw & 0x1f);
 				offset5 = SIGN_EXTEND(offset5, 16);
 			} else {
-				offset5 = SIGN_EXTEND(offset5, 5) << 1;
+				offset5 <<= 1;
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
@@ -1282,15 +1280,11 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    ((extend_word >> 5) & 0x3f) << 5 |
 				    (iw & 0x1f);
 				offset5 = SIGN_EXTEND(offset5, 16);
-			} else {
-				offset5 = SIGN_EXTEND(offset5, 5);
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
-			if (!m16_store_byte(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
-			}
+			ok = m16_store_byte(cpu, a, M16REG(ry));
+			M16_CHECK_MEM_OK(ok);
 		}
 		break;
 
@@ -1304,14 +1298,12 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    (iw & 0x1f);
 				offset5 = SIGN_EXTEND(offset5, 16);
 			} else {
-				offset5 = SIGN_EXTEND(offset5, 5) << 1;
+				offset5 <<= 1;
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
-			if (!m16_store_half(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
-			}
+			ok = m16_store_half(cpu, a, M16REG(ry));
+			M16_CHECK_MEM_OK(ok);
 		}
 		break;
 
@@ -1329,10 +1321,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			}
 			a = (uint64_t)((int64_t)(int32_t)
 			    cpu->cd.mips.gpr[MIPS_GPR_SP] + imm8);
-			if (!m16_store_word(cpu, a, M16REG(rx))) {
-				cpu->running = 0;
-				return 0;
-			}
+			ok = m16_store_word(cpu, a, M16REG(rx));
+			M16_CHECK_MEM_OK(ok);
 		}
 		break;
 
@@ -1350,10 +1340,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
-			if (!m16_store_word(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
-			}
+			ok = m16_store_word(cpu, a, M16REG(ry));
+			M16_CHECK_MEM_OK(ok);
 		}
 		break;
 
