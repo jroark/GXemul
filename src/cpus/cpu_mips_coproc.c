@@ -57,7 +57,10 @@ static const char *regnames[] = MIPS_REGISTER_NAMES;
  */
 void initialize_cop0_config(struct cpu *cpu, struct mips_coproc *c)
 {
-	const int m16 = 0;	/*  TODO: MIPS16 support  */
+	/*  MIPS16 is emulated only for the VR41xx (cpu_mips16.c); a real
+	 *  BE-300 VR4131 reads Config = 0x10135923, M16 set (be300
+	 *  docs/hardware/cpu_state.txt:19).  */
+	const int m16 = cpu->cd.mips.cpu_type.rev == MIPS_R4100;
 	int IB, DB, SB, IC, DC, SC, IA, DA;
 
 	/*  Generic case for MIPS32/64:  */
