@@ -64,6 +64,15 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 	}								\
 } while (0)
 
+/*  An opcode this interpreter doesn't decode raises Reserved Instruction,
+ *  as an undefined opcode does on the CPU, instead of stopping the
+ *  emulator. The message still flags it: it may be a gap in the emulator
+ *  rather than a bad guest.  */
+#define	M16_RESERVED_INSTRUCTION()	do {				\
+	mips_cpu_exception(cpu, EXCEPTION_RI, 0, 0, 0, 0, 0, 0);	\
+	return 1;							\
+} while (0)
+
 /*  Sign-extend a value with 'bits' significant bits  */
 #define	SIGN_EXTEND(val, bits)	\
 	((int32_t)((uint32_t)(val) << (32 - (bits))) >> (32 - (bits)))
@@ -762,8 +771,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				/*  We consumed EXTEND then got JAL as next -
 				    this shouldn't happen in valid code.  */
 				fatal("EXTEND + JAL: invalid\n");
-				cpu->running = 0;
-				return 0;
+				M16_RESERVED_INSTRUCTION();
 			}
 
 			/*  First halfword is iw (the JAL opcode word)  */
@@ -894,8 +902,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			default:
 				fatal("UNIMPLEMENTED MIPS16 shift type %i "
 				    "at 0x%" PRIx64 "\n", type, cpu->pc);
-				cpu->running = 0;
-				return 0;
+				M16_RESERVED_INSTRUCTION();
 			}
 		}
 		break;
@@ -1091,8 +1098,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			default:
 				fatal("UNIMPLEMENTED MIPS16 I8 func %i "
 				    "at 0x%" PRIx64 "\n", i8func, cpu->pc);
-				cpu->running = 0;
-				return 0;
+				M16_RESERVED_INSTRUCTION();
 			}
 		}
 		break;
@@ -1370,8 +1376,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			default:
 				fatal("UNIMPLEMENTED MIPS16 RRR func %i "
 				    "at 0x%" PRIx64 "\n", rrr_func, cpu->pc);
-				cpu->running = 0;
-				return 0;
+				M16_RESERVED_INSTRUCTION();
 			}
 		}
 		break;
@@ -1516,16 +1521,14 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		default:
 			fatal("UNIMPLEMENTED MIPS16 RR func 0x%02x "
 			    "at 0x%" PRIx64 "\n", func, cpu->pc);
-			cpu->running = 0;
-			return 0;
+			M16_RESERVED_INSTRUCTION();
 		}
 		break;
 
 	default:
 		fatal("UNIMPLEMENTED MIPS16 opcode 0x%02x "
 		    "at 0x%" PRIx64 "\n", op, cpu->pc);
-		cpu->running = 0;
-		return 0;
+		M16_RESERVED_INSTRUCTION();
 	}
 
 	/*  Advance PC past this instruction  */
