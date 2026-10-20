@@ -46,7 +46,6 @@
 #include "emul.h"
 #include "machine.h"
 #include "memory.h"
-#include "be300_probe.h"
 #include "mips_cpu_types.h"
 
 /*
