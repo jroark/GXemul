@@ -43,6 +43,74 @@
 #include "thirdparty/vripreg.h"
 
 
+/*
+ *  BE-300 VRC4173 GIRQ0 gate.
+ *
+ *  The VRC4173 ORs its interrupt sources (PCMCIA, keys, the CommMode/SIU
+ *  dock, USB, wave DMA, touch) onto one line into VR4131 GIU pin 0, and
+ *  reports which are pending at AA000004 (be300 docs/hardware/hardware.txt
+ *  :15-32, :65-145). GXemul keeps one level per GIU pin, so sources that
+ *  shared giu.0 directly lost each other's interrupts: the first source to
+ *  deassert cleared the pin while another was still pending.
+ *
+ *  Each source connects to its own pin, "<giu.0 path>.girq0.<n>" (n is a
+ *  connection slot, not an AA000004 bit). A source rising re-raises the GIU
+ *  pin, which re-latches GIUINTSTAT like a new edge; the pin falls when no
+ *  source is pending.
+ */
+#define	BE300_GIRQ0_PINS	16
+
+struct be300_girq0 {
+	uint32_t		pending;
+	struct interrupt	giu_pin;
+};
+
+static void be300_girq0_assert(struct interrupt *in)
+{
+	struct be300_girq0 *g = (struct be300_girq0 *) in->extra;
+
+	if (g->pending & (1u << in->line))
+		return;
+	g->pending |= 1u << in->line;
+	INTERRUPT_ASSERT(g->giu_pin);
+}
+
+static void be300_girq0_deassert(struct interrupt *in)
+{
+	struct be300_girq0 *g = (struct be300_girq0 *) in->extra;
+
+	if (!(g->pending & (1u << in->line)))
+		return;
+	g->pending &= ~(1u << in->line);
+	if (!g->pending)
+		INTERRUPT_DEASSERT(g->giu_pin);
+}
+
+static void be300_girq0_init(struct machine *machine)
+{
+	struct be300_girq0 *g;
+	char giu[200], name[300];
+
+	CHECK_ALLOCATION(g = (struct be300_girq0 *) calloc(1, sizeof(*g)));
+	snprintf(giu, sizeof(giu), "%s.cpu[%i].vrip.%i.giu.0",
+	    machine->path, machine->bootstrap_cpu, VRIP_INTR_GIU);
+	INTERRUPT_CONNECT(giu, g->giu_pin);
+
+	for (int i = 0; i < BE300_GIRQ0_PINS; i++) {
+		struct interrupt templ;
+
+		snprintf(name, sizeof(name), "%s.girq0.%i", giu, i);
+		memset(&templ, 0, sizeof(templ));
+		templ.line = i;
+		templ.name = name;
+		templ.extra = g;
+		templ.interrupt_assert = be300_girq0_assert;
+		templ.interrupt_deassert = be300_girq0_deassert;
+		interrupt_handler_register(&templ);
+	}
+}
+
+
 MACHINE_SETUP(hpcmips)
 {
 	char tmpstr[1000];
@@ -86,16 +154,17 @@ MACHINE_SETUP(hpcmips)
 		hpc_fb_encoding = BIFB_D16_0000;
 
 		dev_vr41xx_init(machine, machine->memory, 4131);
+		be300_girq0_init(machine);
 
 		/*
 		 * VRC4173 companion chip SIU.  The BE-300 serial block is on
 		 * the companion at 0xaa008680 (hardware.txt:190), and serial
-		 * wake/CommMode status is routed through GIU0 into the VR4131
+		 * wake/CommMode status is routed through GIRQ0 into the VR4131
 		 * GIU path (hardware.txt:122-130), not through the VR4131
 		 * internal SIU interrupt.
 		 */
 		snprintf(tmpstr, sizeof(tmpstr),
-		    "ns16550 irq=%s.cpu[%i].vrip.%i.giu.0"
+		    "ns16550 irq=%s.cpu[%i].vrip.%i.giu.0.girq0.15"
 		    " addr=0x0a008680 addr_mult=4 in_use=%i"
 		    " name2=vrc4173siu",
 		    machine->path, machine->bootstrap_cpu, VRIP_INTR_GIU, 1);
