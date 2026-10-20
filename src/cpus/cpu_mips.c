@@ -379,7 +379,13 @@ void mips_cpu_cold_reset(struct cpu *cpu)
 	cpu->cd.mips.rmw_addr                   = 0;
 	cpu->cd.mips.compare_countdown_cycles   = 0;
 
-	cpu->delay_slot            = NOT_DELAYED;
+	/*
+	 * A reset can come from a store in a branch delay slot (jr ra;
+	 * sh t0,SOFTRST). Mark it like mips_cpu_exception() does, or the
+	 * branch instruction overwrites the reset PC with its target when
+	 * the delay slot returns.
+	 */
+	cpu->delay_slot = cpu->delay_slot ? EXCEPTION_IN_DELAY_SLOT : NOT_DELAYED;
 	cpu->translation_readahead = 0;
 
 	if (cpu->invalidate_translation_caches != NULL)
