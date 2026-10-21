@@ -138,9 +138,27 @@ MACHINE_SETUP(hpcmips)
 	switch (machine->machine_subtype) {
 
 	case MACHINE_HPCMIPS_CASIO_BE300:
-		/*  166MHz VR4131, PClock = 131.072 MHz  */
+		/*
+		 *  166 MHz VR4131. The guest reads its clocks from CLKSPEEDREG
+		 *  (0x020c, seeded in dev_vr41xx.c): PClock 165.888 MHz,
+		 *  VTClock 82.944 MHz, TClock 41.472 MHz, the values the
+		 *  Linux ports print on real units. One
+		 *  instruction per PClock cycle makes emulated time match the
+		 *  default --speed 166 throttle; 131.072 MHz here made every
+		 *  emulated-time device run 1.27x fast against it.
+		 */
 		machine->machine_name = strdup("Casio Cassiopeia BE-300");
-		machine->emulated_hz = 131072000;
+		machine->emulated_hz = 165888000;
+		/*
+		 *  This VR4131 (PRId 0x0c80) increments Count at TClock/4,
+		 *  10.368 MHz: Linux's vr41xx plat_time_init() uses tclock/4
+		 *  for every VR41xx but VR4131 rev 2.x (tclock/2), and its
+		 *  BE-300 ports report a 10 MHz sched_clock, and WinCE 3.0's
+		 *  OAL sets Compare = Count + 10368 for its 1 ms tick. That is
+		 *  one Count tick per 16 PClock cycles; at the R4000's PClock/2
+		 *  rate, Count ran 8x fast and WinCE's tick with it.
+		 */
+		cpu->cd.mips.count_div = 165888000 / (41472000 / 4);
 		hpc_fb_addr = 0x0a200000;
 		hpc_fb_xsize = machine->hpcmips_fb_width ?
 		    machine->hpcmips_fb_width : 240;

@@ -464,17 +464,20 @@ mips_count_update:
 		old = cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
 		diff1 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] - old;
 		/*
-		 *  Count runs at half the pipeline clock (VR4131 UM §7.1,
-		 *  as on the R4000); the emulator runs one instruction per
-		 *  cycle at emulated_hz, so Count gains one per two
-		 *  instructions, carrying the odd one over.
+		 *  The emulator runs one instruction per cycle at
+		 *  emulated_hz; Count gains one per count_div cycles
+		 *  (2 on an R4000, half the pipeline clock; the machine
+		 *  sets its own rate), carrying the remainder over.
 		 */
 		{
 			uint64_t cycles = (uint64_t)n_instrs +
-			    cpu->cd.mips.count_half_cycle;
-			cpu->cd.mips.count_half_cycle = cycles & 1;
+			    cpu->cd.mips.count_cycle_carry;
+			uint32_t div = cpu->cd.mips.count_div ?
+			    cpu->cd.mips.count_div : 2;
+			cpu->cd.mips.count_cycle_carry =
+			    (uint32_t)(cycles % div);
 			cpu->cd.mips.coproc[0]->reg[COP0_COUNT] =
-			    (int32_t) (old + (uint32_t)(cycles >> 1));
+			    (int32_t) (old + (uint32_t)(cycles / div));
 		}
 		diff2 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] -
 		    cpu->cd.mips.coproc[0]->reg[COP0_COUNT];

@@ -369,7 +369,7 @@ void mips_cpu_cold_reset(struct cpu *cpu)
 	cpu->cd.mips.rmw                        = 0;
 	cpu->cd.mips.rmw_len                    = 0;
 	cpu->cd.mips.rmw_addr                   = 0;
-	cpu->cd.mips.count_half_cycle           = 0;
+	cpu->cd.mips.count_cycle_carry          = 0;
 
 	/*
 	 * A reset can come from a store in a branch delay slot (jr ra;
