@@ -92,7 +92,7 @@ struct vr41xx_data {
 	uint64_t	rtcl1_period_cycles;
 	uint64_t	etime_cycle_accum;
 	uint64_t	etime_period_cycles;
-	uint32_t	last_count_sample;	/* for DEVICE_TICK cycle delta */
+	uint64_t	last_cycle_sample;	/* cpu->ninstrs at the last DEVICE_TICK */
 
 	/*  See icureg.h in NetBSD for more info.  */
 	uint16_t	sysint1;
@@ -113,11 +113,6 @@ struct vr41xx_data {
 	uint8_t		dcu_regs[0x20];
 	uint8_t		sdramu_regs[0x10];
 };
-
-/* Public: the DSIU (VR4131 Debug SIU) ns16550 console handle, captured
- * when the device is registered so the BE-300 machine layer can push
- * keystrokes into it directly. -1 until set. */
-int dev_vr41xx_dsiu_console_handle = -1;
 
 
 static uint64_t vr41xx_latch_read(const uint8_t *regs, uint32_t off,
@@ -197,7 +192,8 @@ int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
 /*
  *  vr41xx_on_interrupt_delivered():
  *
- *  Called by mips_cpu_exception() when the CPU takes an EXCEPTION_INT
+ *  The CPU's ip_edge_delivered hook: called by mips_cpu_exception() when
+ *  the CPU takes an EXCEPTION_INT
  *  whose CAUSE.IP bits include any of ip_edge_triggered_mask. This lets
  *  the VRIP aggregator resync its internal latches now that the CPU has
  *  delivered the edge.
@@ -207,12 +203,11 @@ int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
  *  and 13.2.9). Other enabled level sources such as GIU/touch must keep
  *  IP2 asserted after the CPU-side edge latch is cleared.
  */
-void vr41xx_on_interrupt_delivered(struct cpu *cpu, uint32_t cleared_ip_mask)
+static void vr41xx_on_interrupt_delivered(void *extra,
+	uint32_t cleared_ip_mask)
 {
-	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
-	(void)cpu;
-	if (d == NULL)
-		return;
+	struct vr41xx_data *d = (struct vr41xx_data *) extra;
+
 	/*  CAUSE bit 10 == IP2 (STATUS_IM_SHIFT + 2). If that's in the
 	    cleared mask, consume the RTCL1 edge.  */
 	if ((cleared_ip_mask & (1u << 10)) != 0 && d->rtcl1_irq_asserted) {
@@ -462,6 +457,50 @@ static void vr41xx_keytick(struct cpu *cpu, struct vr41xx_data *d)
 
 
 /*
+ *  vr41xx_rtcl1_program():
+ *
+ *  Load the RTCL1 timer with a period of "ticks" 32.768 kHz clocks
+ *  (VR4131 UM 13.2.5). The counter restarts; 0 stops the timer.
+ */
+static void vr41xx_rtcl1_program(struct cpu *cpu, struct vr41xx_data *d,
+	uint32_t ticks)
+{
+	uint64_t emulated_hz = cpu->machine != NULL
+	    ? (uint64_t)cpu->machine->emulated_hz : 0;
+
+	if (emulated_hz == 0)
+		emulated_hz = 131072000ULL;
+
+	d->rtcl1_divisor = ticks;
+	d->rtcl1_cycle_accum = 0;
+	d->rtcl1_period_cycles = ticks == 0 ? 0 :
+	    (emulated_hz * (uint64_t)ticks) / (uint64_t)RTCL1_L_HZ;
+	if (ticks != 0 && d->rtcl1_period_cycles == 0)
+		d->rtcl1_period_cycles = 1;
+}
+
+
+/*
+ *  vr41xx_rtcl1_count():
+ *
+ *  The RTCL1 down-counter: 32.768 kHz clocks left before the next
+ *  underflow, counting the cycles since the last DEVICE_TICK.
+ */
+static uint32_t vr41xx_rtcl1_count(struct cpu *cpu, struct vr41xx_data *d)
+{
+	uint64_t done, left;
+
+	if (d->rtcl1_period_cycles == 0)
+		return 0;
+	done = d->rtcl1_cycle_accum + (cpu->ninstrs - d->last_cycle_sample);
+	done %= d->rtcl1_period_cycles;
+	left = d->rtcl1_period_cycles - done;
+	return (uint32_t)((left * d->rtcl1_divisor +
+	    d->rtcl1_period_cycles - 1) / d->rtcl1_period_cycles);
+}
+
+
+/*
  *  timer_tick():
  */
 static void timer_tick(struct timer *timer, void *extra)
@@ -494,37 +533,21 @@ DEVICE_TICK(vr41xx)
 	if (emulated_hz == 0)
 		emulated_hz = 131072000ULL;
 	/*
-	 * Use CP0 Count delta as the true elapsed-cycles measure since the
-	 * last DEVICE_TICK call. Dyntrans batches terminate early (exceptions,
-	 * page boundaries) so the callback fires far more often than the
-	 * nominal 1<<TICKSHIFT cycle interval — treating the tick interval as
-	 * a fixed 1<<TICKSHIFT causes accum to grow 10-100× too fast and
-	 * RTCL1 to assert on nearly every DEVICE_TICK (observed ~131 kHz vs
-	 * 1 kHz spec for WinCE NK). See memory/project_post_ppsh_stall.md
-	 * Pass 8.
+	 * Time the RTC, RTCL1 and the PMU HALTimer from emulated cycles:
+	 * cpu->ninstrs, one cycle per instruction at emulated_hz. Dyntrans
+	 * batches end early (exceptions, page boundaries), so this callback
+	 * runs more often than its nominal interval and must measure what
+	 * actually elapsed. CP0 Count was used before, but the guest can
+	 * write it and it runs at a different rate.
 	 */
 	{
-		uint32_t cur_count =
-		    (uint32_t)cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
-		uint32_t count_delta = cur_count - d->last_count_sample;
-		d->last_count_sample = cur_count;
-		/*
-		 * Clamp to a sane upper bound on the first call / after
-		 * Count-register writes by the guest, so a 32-bit wraparound
-		 * or guest-driven reset doesn't inject a 4 GB cycle burst.
-		 */
-		if (count_delta > (uint32_t)(1U << DEV_VR41XX_TICKSHIFT) * 4)
-			count_delta = (uint32_t)(1U << DEV_VR41XX_TICKSHIFT);
-		tick_cycles = count_delta;
+		uint64_t now = cpu->ninstrs;
 
-		/*
-		 * Pet / fire the PMU HALTimer watchdog (UM §12.2.2). Mask
-		 * to 32 bits because COP0_COUNT is stored sign-extended
-		 * (cpu_dyntrans.c:469 uses `(int32_t)(old + n_instrs)`),
-		 * so feeding the raw uint64_t drives the PMU delta math
-		 * negative across the 0x80000000 boundary.
-		 */
-		pmu_tick(&d->pmu, (uint64_t) cur_count);
+		tick_cycles = now - d->last_cycle_sample;
+		d->last_cycle_sample = now;
+
+		/*  Pet / fire the PMU HALTimer watchdog (UM §12.2.2).  */
+		pmu_tick(&d->pmu, now);
 	}
 
 	if (d->etime_period_cycles == 0) {
@@ -554,12 +577,17 @@ DEVICE_TICK(vr41xx)
 		 * timer up after the first fire.
 		 */
 		d->rtcl1_cycle_accum += tick_cycles;
-		while (d->rtcl1_cycle_accum >= d->rtcl1_period_cycles) {
+		if (d->rtcl1_cycle_accum >= d->rtcl1_period_cycles) {
 			d->rtcl1_cycle_accum -= d->rtcl1_period_cycles;
 			timer_tick(NULL, d);
-			if (d->pending_timer_interrupts > 0)
-				break;
 		}
+		/*  One edge is delivered per DEVICE_TICK, so a backlog
+		    (the IRQ masked, a long WAIT) is replayed later; keep
+		    at most a few periods of it rather than an unbounded
+		    catch-up burst.  */
+		if (d->rtcl1_cycle_accum >= 4 * d->rtcl1_period_cycles)
+			d->rtcl1_cycle_accum = d->rtcl1_cycle_accum %
+			    d->rtcl1_period_cycles + d->rtcl1_period_cycles;
 	}
 
 	/*
@@ -870,11 +898,9 @@ DEVICE_ACCESS(vr41xx)
 				 * handle) and drive the cold-reset thunk.
 				 */
 				if (d->pmu.softrst_pending) {
-					uint64_t cur_count = (uint32_t)
-					    cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
 					d->pmu.softrst_pending = 0;
 					pmu_apply_pending_reset_state(&d->pmu,
-					    cur_count);
+					    cpu->ninstrs);
 					if (d->pmu.cold_reset != NULL)
 						d->pmu.cold_reset(d->pmu.cpu_opaque);
 				}
@@ -906,43 +932,30 @@ DEVICE_ACCESS(vr41xx)
 
 	case 0xd0:	/*  RTCL1_L_REG_W (older VR41xx)  */
 	case 0x110:	/*  RTCL1_L_REG_W (VR4131 relocated)  */
-		if (writeflag == MEM_WRITE && idata != 0) {
-			uint64_t emulated_hz = cpu->machine != NULL
-			    ? (uint64_t)cpu->machine->emulated_hz : 0;
-
-			if (emulated_hz == 0)
-				emulated_hz = 131072000ULL;
-
-			d->rtcl1_divisor = (uint32_t)idata;
-			d->rtcl1_cycle_accum = 0;
-			d->rtcl1_period_cycles =
-			    (emulated_hz * (uint64_t)d->rtcl1_divisor)
-			    / (uint64_t)RTCL1_L_HZ;
-			if (d->rtcl1_period_cycles == 0)
-				d->rtcl1_period_cycles = 1;
-		}
-		if (d->cpumodel == 4131 && relative_addr == 0x110) {
-			uint32_t rtc_off = (uint32_t)(relative_addr - 0x100);
-
-			if (writeflag == MEM_READ)
-				odata = rtc_read(&d->rtc, rtc_off,
-				    (unsigned)len);
-			else
-				rtc_write(&d->rtc, rtc_off, (unsigned)len,
-				    (uint32_t)idata);
-		}
-		break;
 	case 0xd2:	/*  RTCL1_H_REG_W (older VR41xx)  */
 	case 0x112:	/*  RTCL1_H_REG_W (VR4131 relocated)  */
-		if (d->cpumodel == 4131 && relative_addr == 0x112) {
+		if (d->cpumodel == 4131 && relative_addr >= 0x110) {
 			uint32_t rtc_off = (uint32_t)(relative_addr - 0x100);
 
-			if (writeflag == MEM_READ)
+			if (writeflag == MEM_READ) {
 				odata = rtc_read(&d->rtc, rtc_off,
 				    (unsigned)len);
-			else
-				rtc_write(&d->rtc, rtc_off, (unsigned)len,
-				    (uint32_t)idata);
+				break;
+			}
+			rtc_write(&d->rtc, rtc_off, (unsigned)len,
+			    (uint32_t)idata);
+			/*  RTCL1 is a 24-bit reload value split over
+			    RTCL1LREG/RTCL1HREG (VR4131 UM 13.2.5); the
+			    period follows the whole register, whichever
+			    half was written.  */
+			vr41xx_rtcl1_program(cpu, d,
+			    d->rtc.rtcl1 & 0xffffff);
+		} else if (writeflag == MEM_WRITE &&
+		    (relative_addr == 0xd0 || relative_addr == 0x110) &&
+		    idata != 0) {
+			/*  Older VR41xx: the low half alone programs the
+			    timer, as before.  */
+			vr41xx_rtcl1_program(cpu, d, (uint32_t)idata);
 		}
 		break;
 
@@ -959,6 +972,17 @@ DEVICE_ACCESS(vr41xx)
 	case 0x10c:	/*  VR4131 ECMPHREG  */
 	case 0x114:	/*  VR4131 RTCL1CNTLREG  */
 	case 0x116:	/*  VR4131 RTCL1CNTHREG  */
+		if (d->cpumodel == 4131 && writeflag == MEM_READ &&
+		    (relative_addr == 0x114 || relative_addr == 0x116)) {
+			/*  The RTCL1 down-counter (VR4131 UM 13.2.6):
+			    32.768 kHz ticks left in this period.  */
+			uint32_t cnt = vr41xx_rtcl1_count(cpu, d);
+
+			odata = relative_addr == 0x114 ? (cnt & 0xffff)
+			    : ((cnt >> 16) & 0xff);
+			break;
+		}
+		/*  FALLTHROUGH  */
 	case 0x118:	/*  VR4131 RTCL2LREG  */
 	case 0x11a:	/*  VR4131 RTCL2HREG  */
 	case 0x11c:	/*  VR4131 RTCL2CNTLREG  */
@@ -1153,6 +1177,8 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	{
 		struct cpu *c = machine->cpus[machine->bootstrap_cpu];
 		c->cd.mips.ip_edge_triggered_mask |= (1u << 10);
+		c->cd.mips.ip_edge_delivered = vr41xx_on_interrupt_delivered;
+		c->cd.mips.ip_edge_delivered_extra = d;
 	}
 	g_vr41xx_for_edge_cb = d;
 
@@ -1200,20 +1226,14 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	 * that must be petted via PMUCNTREG bit 2 or the CPU is cold-reset
 	 * with SDRAM preserved.
 	 *
-	 * Count rate: gxemul's dyntrans increments COP0_COUNT by n_instrs
-	 * per batch (cpu_dyntrans.c:469), so in-emulator Count advances at
-	 * ~emulated_hz, not CPU/2. The hz/2 cadence fix in
-	 * cpu_mips_coproc.c only affects the Compare wall-clock timer, not
-	 * Count itself. Using emulated_hz * 4 here gives ~4 seconds of
-	 * emulated time on the same clock basis as all other Count-driven
-	 * timers in this tree.
+	 * The window is in emulated cycles (cpu->ninstrs at emulated_hz),
+	 * the same clock DEVICE_TICK uses for the RTC and RTCL1.
 	 */
 	if (cpumodel == 4131) {
 		struct cpu *c0 = machine->cpus[machine->bootstrap_cpu];
-		uint64_t cur_count = (uint32_t)
-		    c0->cd.mips.coproc[0]->reg[COP0_COUNT];
 		uint64_t arm_cycles = (uint64_t)machine->emulated_hz * 4;
-		pmu_arm_initial(&d->pmu, cur_count, arm_cycles,
+		d->last_cycle_sample = c0->ninstrs;
+		pmu_arm_initial(&d->pmu, c0->ninstrs, arm_cycles,
 		    vr41xx_issue_cold_reset_thunk, c0);
 	}
 
@@ -1298,8 +1318,7 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 		    "addr=0x%" PRIx64" in_use=0 name2=dsiu", machine->path,
 		    machine->bootstrap_cpu, VRIP_INTR_DSIU,
 		    (uint64_t) (baseaddr+0x820));
-		dev_vr41xx_dsiu_console_handle = (int)(size_t)
-		    device_add(machine, tmps);
+		device_add(machine, tmps);
 	} else {
 		/*  This is used by Linux and NetBSD:  */
 		snprintf(tmps, sizeof(tmps), "ns16550 irq=%s.cpu[%i]."

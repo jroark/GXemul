@@ -46,17 +46,8 @@
 #include "emul.h"
 #include "machine.h"
 #include "memory.h"
-#include "be300_probe.h"
 #include "mips_cpu_types.h"
 
-/*
- *  Optional callback from the VR41xx device so that it can resync its
- *  internal pending state when the CPU takes an edge-triggered interrupt
- *  exception. Defined weakly so non-VR41xx builds don't need to provide
- *  a stub.
- */
-extern void vr41xx_on_interrupt_delivered(struct cpu *cpu,
-    uint32_t cleared_ip_mask) __attribute__((weak));
 #include "opcodes_mips.h"
 #include "settings.h"
 #include "symbol.h"
@@ -378,9 +369,15 @@ void mips_cpu_cold_reset(struct cpu *cpu)
 	cpu->cd.mips.rmw                        = 0;
 	cpu->cd.mips.rmw_len                    = 0;
 	cpu->cd.mips.rmw_addr                   = 0;
-	cpu->cd.mips.compare_countdown_cycles   = 0;
+	cpu->cd.mips.count_half_cycle           = 0;
 
-	cpu->delay_slot            = NOT_DELAYED;
+	/*
+	 * A reset can come from a store in a branch delay slot (jr ra;
+	 * sh t0,SOFTRST). Mark it like mips_cpu_exception() does, or the
+	 * branch instruction overwrites the reset PC with its target when
+	 * the delay slot returns.
+	 */
+	cpu->delay_slot = cpu->delay_slot ? EXCEPTION_IN_DELAY_SLOT : NOT_DELAYED;
 	cpu->translation_readahead = 0;
 
 	if (cpu->invalidate_translation_caches != NULL)
@@ -1814,6 +1811,38 @@ void mips_cpu_interrupt_deassert(struct interrupt *interrupt)
  *	vaddr_asid	asid (for some exceptions)
  *	x_64		non-zero for 64-bit mode for R4000-style tlb misses
  */
+/*
+ *  mips_cpu_check_interrupts():
+ *
+ *  Take a pending, enabled interrupt (Status.IE set, EXL/ERL clear, and
+ *  IM & IP non-zero). Called at the start of each batch, by the dyntrans
+ *  loop and by the MIPS16 interpreter path.
+ */
+void mips_cpu_check_interrupts(struct cpu *cpu)
+{
+	int enabled, mask;
+	int status = cpu->cd.mips.coproc[0]->reg[COP0_STATUS];
+
+	if (cpu->cd.mips.cpu_type.exc_model == EXC3K) {
+		/*  R3000:  */
+		enabled = status & MIPS_SR_INT_IE;
+	} else {
+		/*  R4000 and others:  */
+		enabled = (status & STATUS_IE)
+		    && !(status & STATUS_EXL) && !(status & STATUS_ERL);
+		/*  Special case for R5900/C790/TX79:  */
+		if (cpu->cd.mips.cpu_type.rev == MIPS_R5900 &&
+		    !(status & R5900_STATUS_EIE))
+			enabled = 0;
+	}
+	mask = status & cpu->cd.mips.coproc[0]->reg[COP0_CAUSE]
+	    & STATUS_IM_MASK;
+
+	if (enabled && mask)
+		mips_cpu_exception(cpu, EXCEPTION_INT, 0, 0, 0, 0, 0,0);
+}
+
+
 void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	int coproc_nr, uint64_t vaddr_vpn2, int vaddr_asid, int x_64)
 {
@@ -2111,12 +2140,18 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	 */
 	if (exccode == EXCEPTION_INT &&
 	    cpu->cd.mips.ip_edge_triggered_mask != 0) {
+		/*  Only an edge the CPU could have taken (its Status.IM
+		    bit set, same bit position as Cause.IP) is delivered by
+		    this exception; a masked edge stays pending.  */
+		uint32_t deliverable = cpu->cd.mips.ip_edge_triggered_mask &
+		    (uint32_t)reg[COP0_STATUS] & STATUS_IM_MASK;
 		uint32_t cleared_ip_mask = (uint32_t)(reg[COP0_CAUSE] &
-		    cpu->cd.mips.ip_edge_triggered_mask);
-		reg[COP0_CAUSE] &=
-		    ~(uint64_t)cpu->cd.mips.ip_edge_triggered_mask;
-		if (&vr41xx_on_interrupt_delivered != NULL)
-			vr41xx_on_interrupt_delivered(cpu, cleared_ip_mask);
+		    deliverable);
+		reg[COP0_CAUSE] &= ~(uint64_t)deliverable;
+		if (cpu->cd.mips.ip_edge_delivered != NULL)
+			cpu->cd.mips.ip_edge_delivered(
+			    cpu->cd.mips.ip_edge_delivered_extra,
+			    cleared_ip_mask);
 	}
 
 	/*  Sign-extend:  */

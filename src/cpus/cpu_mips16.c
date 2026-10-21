@@ -64,9 +64,18 @@ static const int mips16_reg_map[8] = MIPS16_REG_MAP;
 	}								\
 } while (0)
 
+/*  An opcode this interpreter doesn't decode raises Reserved Instruction,
+ *  as an undefined opcode does on the CPU, instead of stopping the
+ *  emulator. The message still flags it: it may be a gap in the emulator
+ *  rather than a bad guest.  */
+#define	M16_RESERVED_INSTRUCTION()	do {				\
+	mips_cpu_exception(cpu, EXCEPTION_RI, 0, 0, 0, 0, 0, 0);	\
+	return 1;							\
+} while (0)
+
 /*  Sign-extend a value with 'bits' significant bits  */
 #define	SIGN_EXTEND(val, bits)	\
-	((int32_t)((val) << (32 - (bits))) >> (32 - (bits)))
+	((int32_t)((uint32_t)(val) << (32 - (bits))) >> (32 - (bits)))
 
 /*  Regnames, for disassembly trace output  */
 static const char *regnames[] = MIPS_REGISTER_NAMES;
@@ -448,8 +457,7 @@ static int m16_memory_rw(struct cpu *cpu, uint64_t addr,
 	unsigned char *buf, int len, int writeflag)
 {
 	return cpu->memory_rw(cpu, cpu->mem, addr, buf, len,
-	    writeflag ? MEM_WRITE : MEM_READ,
-	    writeflag ? CACHE_DATA : CACHE_DATA);
+	    writeflag ? MEM_WRITE : MEM_READ, CACHE_DATA);
 }
 
 
@@ -762,8 +770,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				/*  We consumed EXTEND then got JAL as next -
 				    this shouldn't happen in valid code.  */
 				fatal("EXTEND + JAL: invalid\n");
-				cpu->running = 0;
-				return 0;
+				M16_RESERVED_INSTRUCTION();
 			}
 
 			/*  First halfword is iw (the JAL opcode word)  */
@@ -894,8 +901,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			default:
 				fatal("UNIMPLEMENTED MIPS16 shift type %i "
 				    "at 0x%" PRIx64 "\n", type, cpu->pc);
-				cpu->running = 0;
-				return 0;
+				M16_RESERVED_INSTRUCTION();
 			}
 		}
 		break;
@@ -1091,8 +1097,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			default:
 				fatal("UNIMPLEMENTED MIPS16 I8 func %i "
 				    "at 0x%" PRIx64 "\n", i8func, cpu->pc);
-				cpu->running = 0;
-				return 0;
+				M16_RESERVED_INSTRUCTION();
 			}
 		}
 		break;
@@ -1137,8 +1142,6 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    ((extend_word >> 5) & 0x3f) << 5 |
 				    (iw & 0x1f);
 				offset5 = SIGN_EXTEND(offset5, 16);
-			} else {
-				offset5 = SIGN_EXTEND(offset5, 5);
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
@@ -1159,7 +1162,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    (iw & 0x1f);
 				offset5 = SIGN_EXTEND(offset5, 16);
 			} else {
-				offset5 = SIGN_EXTEND(offset5, 5) << 1;
+				offset5 <<= 1;
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
@@ -1282,15 +1285,11 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    ((extend_word >> 5) & 0x3f) << 5 |
 				    (iw & 0x1f);
 				offset5 = SIGN_EXTEND(offset5, 16);
-			} else {
-				offset5 = SIGN_EXTEND(offset5, 5);
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
-			if (!m16_store_byte(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
-			}
+			ok = m16_store_byte(cpu, a, M16REG(ry));
+			M16_CHECK_MEM_OK(ok);
 		}
 		break;
 
@@ -1304,14 +1303,12 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				    (iw & 0x1f);
 				offset5 = SIGN_EXTEND(offset5, 16);
 			} else {
-				offset5 = SIGN_EXTEND(offset5, 5) << 1;
+				offset5 <<= 1;
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
-			if (!m16_store_half(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
-			}
+			ok = m16_store_half(cpu, a, M16REG(ry));
+			M16_CHECK_MEM_OK(ok);
 		}
 		break;
 
@@ -1329,10 +1326,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			}
 			a = (uint64_t)((int64_t)(int32_t)
 			    cpu->cd.mips.gpr[MIPS_GPR_SP] + imm8);
-			if (!m16_store_word(cpu, a, M16REG(rx))) {
-				cpu->running = 0;
-				return 0;
-			}
+			ok = m16_store_word(cpu, a, M16REG(rx));
+			M16_CHECK_MEM_OK(ok);
 		}
 		break;
 
@@ -1350,10 +1345,8 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			}
 			a = (uint64_t)((int64_t)(int32_t)M16REG(rx) +
 			    offset5);
-			if (!m16_store_word(cpu, a, M16REG(ry))) {
-				cpu->running = 0;
-				return 0;
-			}
+			ok = m16_store_word(cpu, a, M16REG(ry));
+			M16_CHECK_MEM_OK(ok);
 		}
 		break;
 
@@ -1368,9 +1361,6 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				break;
 			case M16_RRR_SUBU:
 				{
-					static int subu_diag = 0;
-					uint32_t rpc =
-					    (uint32_t)cpu->pc & 0x3FFF;
 					uint32_t s1v =
 					    (uint32_t)M16REG(rx);
 					uint32_t s2v =
@@ -1382,8 +1372,7 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 			default:
 				fatal("UNIMPLEMENTED MIPS16 RRR func %i "
 				    "at 0x%" PRIx64 "\n", rrr_func, cpu->pc);
-				cpu->running = 0;
-				return 0;
+				M16_RESERVED_INSTRUCTION();
 			}
 		}
 		break;
@@ -1528,16 +1517,14 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 		default:
 			fatal("UNIMPLEMENTED MIPS16 RR func 0x%02x "
 			    "at 0x%" PRIx64 "\n", func, cpu->pc);
-			cpu->running = 0;
-			return 0;
+			M16_RESERVED_INSTRUCTION();
 		}
 		break;
 
 	default:
 		fatal("UNIMPLEMENTED MIPS16 opcode 0x%02x "
 		    "at 0x%" PRIx64 "\n", op, cpu->pc);
-		cpu->running = 0;
-		return 0;
+		M16_RESERVED_INSTRUCTION();
 	}
 
 	/*  Advance PC past this instruction  */

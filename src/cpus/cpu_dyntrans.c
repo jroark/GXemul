@@ -111,21 +111,7 @@ static void gather_statistics(struct cpu *cpu)
 #if 1
 
 /*  The normal instruction execution core:  */
-#define I	do {							\
-		ic = cpu->cd.DYNTRANS_ARCH.next_ic ++;		\
-		if (!cpu->translation_readahead) {		\
-			int low_pc = ((size_t)ic -			\
-			    (size_t)cpu->cd.DYNTRANS_ARCH.cur_ic_page) / \
-			    sizeof(struct DYNTRANS_IC);		\
-			MODE_uint_t exec_pc = cpu->pc;		\
-			exec_pc &= ~((DYNTRANS_IC_ENTRIES_PER_PAGE-1) << \
-			    DYNTRANS_INSTR_ALIGNMENT_SHIFT);	\
-			exec_pc += (low_pc <<			\
-			    DYNTRANS_INSTR_ALIGNMENT_SHIFT);	\
-			be300_probe_note_exec(cpu, (uint64_t)exec_pc); \
-		}						\
-		ic->f(cpu, ic);					\
-	} while (0)
+#define I	ic = cpu->cd.DYNTRANS_ARCH.next_ic ++; ic->f(cpu, ic);
 
 #else
 
@@ -194,21 +180,26 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 	int low_pc, n_instrs;
 
 	/*
-	 *  MIPS16 mode: bypass dyntrans and use slow interpreter.
-	 *  This must come before PC-to-pointers conversion and interrupt
-	 *  checks, as the dyntrans IC system assumes fixed-width instructions.
+	 *  MIPS16 mode: bypass dyntrans and use the slow interpreter (the
+	 *  IC pages assume fixed-width instructions). It takes interrupts
+	 *  and advances Count like a dyntrans batch; an interrupt switches
+	 *  to MIPS32, and the batch then runs the handler below.
 	 */
 #ifdef DYNTRANS_MIPS
 	if (cpu->cd.mips.mips16) {
-		int m16_count = 0;
-		while (cpu->cd.mips.mips16 && cpu->running &&
-		    m16_count < N_SAFE_DYNTRANS_LIMIT) {
-			int r = mips_cpu_interpret_mips16_SLOW(cpu);
-			if (!r)
-				break;
-			m16_count++;
+		if (!single_step)
+			mips_cpu_check_interrupts(cpu);
+		if (cpu->cd.mips.mips16) {
+			int m16_count = 0;
+			while (cpu->cd.mips.mips16 && cpu->running &&
+			    m16_count < N_SAFE_DYNTRANS_LIMIT) {
+				if (!mips_cpu_interpret_mips16_SLOW(cpu))
+					break;
+				m16_count++;
+			}
+			n_instrs = m16_count;
+			goto mips_count_update;
 		}
-		return m16_count > 0 ? m16_count : 1;
 	}
 #endif
 
@@ -247,25 +238,7 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 			m88k_exception(cpu, M88K_EXCEPTION_INTERRUPT, 0);
 #endif
 #ifdef DYNTRANS_MIPS
-		int enabled, mask;
-		int status = cpu->cd.mips.coproc[0]->reg[COP0_STATUS];
-		if (cpu->cd.mips.cpu_type.exc_model == EXC3K) {
-			/*  R3000:  */
-			enabled = status & MIPS_SR_INT_IE;
-		} else {
-			/*  R4000 and others:  */
-			enabled = (status & STATUS_IE)
-			    && !(status & STATUS_EXL) && !(status & STATUS_ERL);
-			/*  Special case for R5900/C790/TX79:  */
-			if (cpu->cd.mips.cpu_type.rev == MIPS_R5900 &&
-			    !(status & R5900_STATUS_EIE))
-				enabled = 0;
-		}
-		mask = status & cpu->cd.mips.coproc[0]->reg[COP0_CAUSE]
-		    & STATUS_IM_MASK;
-
-		if (enabled && mask)
-			mips_cpu_exception(cpu, EXCEPTION_INT, 0, 0, 0, 0, 0,0);
+		mips_cpu_check_interrupts(cpu);
 #endif
 #ifdef DYNTRANS_PPC
 		if (cpu->cd.ppc.dec_intr_pending && cpu->cd.ppc.msr & PPC_MSR_EE) {
@@ -406,8 +379,32 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 		}
 	}
 
+#ifdef DYNTRANS_MIPS
+	/*  A MIPS16 switch cut the batch short (MIPS_END_BATCH): count what
+	    ran before it plus the block the loop finished afterwards (the
+	    nothing_call spins in that block already took themselves off
+	    ninstrs), not the forced limit.  */
+	if (cpu->cd.mips.batch_cut) {
+		cpu->n_translated_instrs = cpu->cd.mips.batch_cut_instrs +
+		    (cpu->n_translated_instrs - N_SAFE_DYNTRANS_LIMIT);
+		cpu->cd.mips.batch_cut = 0;
+	}
+#endif
+
 	if (cpu->wants_to_idle) {
+#ifdef DYNTRANS_MIPS
+		/*
+		 *  WAIT/STANDBY: the CPU stops, but time does not. Keep the
+		 *  idle break as elapsed cycles, so Count, Compare and the
+		 *  VR41xx timers (and the host's speed throttle, which paces
+		 *  on ninstrs) see a waiting batch as N_DYNTRANS_IDLE_BREAK
+		 *  cycles. Taking it off made an idle WinCE shell advance
+		 *  about 1.8M of its 131M cycles per host second, so its
+		 *  timers barely moved while it waited for them.
+		 */
+#else
 		cpu->n_translated_instrs -= N_DYNTRANS_IDLE_BREAK;
+#endif
 
 		// TODO: More arch specific interrupt checks
 		if (false
@@ -457,6 +454,7 @@ skip_pc_sync:
 #endif
 
 #ifdef DYNTRANS_MIPS
+mips_count_update:
 	/*  Update the count register (on everything except EXC3K):  */
 	if (cpu->cd.mips.cpu_type.exc_model != EXC3K) {
 		uint32_t old;
@@ -465,23 +463,26 @@ skip_pc_sync:
 		cpu->cd.mips.count_register_read_count = 0;
 		old = cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
 		diff1 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] - old;
-		cpu->cd.mips.coproc[0]->reg[COP0_COUNT] =
-		    (int32_t) (old + n_instrs);
+		/*
+		 *  Count runs at half the pipeline clock (VR4131 UM §7.1,
+		 *  as on the R4000); the emulator runs one instruction per
+		 *  cycle at emulated_hz, so Count gains one per two
+		 *  instructions, carrying the odd one over.
+		 */
+		{
+			uint64_t cycles = (uint64_t)n_instrs +
+			    cpu->cd.mips.count_half_cycle;
+			cpu->cd.mips.count_half_cycle = cycles & 1;
+			cpu->cd.mips.coproc[0]->reg[COP0_COUNT] =
+			    (int32_t) (old + (uint32_t)(cycles >> 1));
+		}
 		diff2 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] -
 		    cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
 
-		if (cpu->cd.mips.compare_register_set) {
-			if (cpu->cd.mips.compare_countdown_cycles > 0) {
-				cpu->cd.mips.compare_countdown_cycles -= n_instrs;
-				if (cpu->cd.mips.compare_countdown_cycles <= 0) {
-					cpu->cd.mips.compare_countdown_cycles = 0;
-					INTERRUPT_ASSERT(
-					    cpu->cd.mips.irq_compare);
-				}
-			} else if (diff1 > 0 && diff2 <= 0)
-				INTERRUPT_ASSERT(
-				    cpu->cd.mips.irq_compare);
-		}
+		/*  Compare interrupt when Count reaches Compare.  */
+		if (cpu->cd.mips.compare_register_set &&
+		    diff1 > 0 && diff2 <= 0)
+			INTERRUPT_ASSERT(cpu->cd.mips.irq_compare);
 	}
 #endif
 #ifdef DYNTRANS_PPC

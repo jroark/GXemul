@@ -220,9 +220,14 @@ struct mips_cpu {
 
 	int		last_written_tlb_index;
 
+	/*  A MIPS16 mode switch ends the dyntrans batch early; the number of
+	    instructions actually run before it (cpu_dyntrans.c restores it).  */
+	int		batch_cut;
+	int		batch_cut_instrs;
+
 	/*  Count/compare timer:  */
 	int		compare_register_set;
-	int64_t		compare_countdown_cycles;
+	uint32_t	count_half_cycle;	/*  cycle left over from Count += n/2  */
 	int32_t		count_register_read_count;
 	struct interrupt irq_compare;
 
@@ -244,6 +249,11 @@ struct mips_cpu {
 	 *  window (see memory/project_post_ppsh_stall.md pass 5-7).
 	 */
 	uint32_t	ip_edge_triggered_mask;
+	/*  Called after exception entry cleared some of those bits, so the
+	    interrupt controller that owns the line can resync (dev_vr41xx).  */
+	void		(*ip_edge_delivered)(void *extra,
+			    uint32_t cleared_ip_mask);
+	void		*ip_edge_delivered_extra;
 
 	/*  MIPS16 compact encoding mode:  */
 	int		mips16;		/*  1 = currently in MIPS16 mode  */
@@ -316,6 +326,7 @@ void mips_cpu_register_dump(struct cpu *cpu, int gprs, int coprocs);
 int mips_cpu_disassemble_instr(struct cpu *cpu, unsigned char *instr,
         int running, uint64_t addr);
 int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu);
+void mips_cpu_check_interrupts(struct cpu *cpu);
 int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
         int running, uint64_t dumpaddr);
 void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
