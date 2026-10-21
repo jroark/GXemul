@@ -326,6 +326,7 @@ void mips_cpu_register_dump(struct cpu *cpu, int gprs, int coprocs);
 int mips_cpu_disassemble_instr(struct cpu *cpu, unsigned char *instr,
         int running, uint64_t addr);
 int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu);
+void mips_cpu_check_interrupts(struct cpu *cpu);
 int mips_cpu_disassemble_instr_mips16(struct cpu *cpu, unsigned char *ib,
         int running, uint64_t dumpaddr);
 void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,

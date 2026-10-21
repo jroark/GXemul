@@ -1811,6 +1811,38 @@ void mips_cpu_interrupt_deassert(struct interrupt *interrupt)
  *	vaddr_asid	asid (for some exceptions)
  *	x_64		non-zero for 64-bit mode for R4000-style tlb misses
  */
+/*
+ *  mips_cpu_check_interrupts():
+ *
+ *  Take a pending, enabled interrupt (Status.IE set, EXL/ERL clear, and
+ *  IM & IP non-zero). Called at the start of each batch, by the dyntrans
+ *  loop and by the MIPS16 interpreter path.
+ */
+void mips_cpu_check_interrupts(struct cpu *cpu)
+{
+	int enabled, mask;
+	int status = cpu->cd.mips.coproc[0]->reg[COP0_STATUS];
+
+	if (cpu->cd.mips.cpu_type.exc_model == EXC3K) {
+		/*  R3000:  */
+		enabled = status & MIPS_SR_INT_IE;
+	} else {
+		/*  R4000 and others:  */
+		enabled = (status & STATUS_IE)
+		    && !(status & STATUS_EXL) && !(status & STATUS_ERL);
+		/*  Special case for R5900/C790/TX79:  */
+		if (cpu->cd.mips.cpu_type.rev == MIPS_R5900 &&
+		    !(status & R5900_STATUS_EIE))
+			enabled = 0;
+	}
+	mask = status & cpu->cd.mips.coproc[0]->reg[COP0_CAUSE]
+	    & STATUS_IM_MASK;
+
+	if (enabled && mask)
+		mips_cpu_exception(cpu, EXCEPTION_INT, 0, 0, 0, 0, 0,0);
+}
+
+
 void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	int coproc_nr, uint64_t vaddr_vpn2, int vaddr_asid, int x_64)
 {

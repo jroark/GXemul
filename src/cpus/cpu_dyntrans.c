@@ -180,21 +180,26 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 	int low_pc, n_instrs;
 
 	/*
-	 *  MIPS16 mode: bypass dyntrans and use slow interpreter.
-	 *  This must come before PC-to-pointers conversion and interrupt
-	 *  checks, as the dyntrans IC system assumes fixed-width instructions.
+	 *  MIPS16 mode: bypass dyntrans and use the slow interpreter (the
+	 *  IC pages assume fixed-width instructions). It takes interrupts
+	 *  and advances Count like a dyntrans batch; an interrupt switches
+	 *  to MIPS32, and the batch then runs the handler below.
 	 */
 #ifdef DYNTRANS_MIPS
 	if (cpu->cd.mips.mips16) {
-		int m16_count = 0;
-		while (cpu->cd.mips.mips16 && cpu->running &&
-		    m16_count < N_SAFE_DYNTRANS_LIMIT) {
-			int r = mips_cpu_interpret_mips16_SLOW(cpu);
-			if (!r)
-				break;
-			m16_count++;
+		if (!single_step)
+			mips_cpu_check_interrupts(cpu);
+		if (cpu->cd.mips.mips16) {
+			int m16_count = 0;
+			while (cpu->cd.mips.mips16 && cpu->running &&
+			    m16_count < N_SAFE_DYNTRANS_LIMIT) {
+				if (!mips_cpu_interpret_mips16_SLOW(cpu))
+					break;
+				m16_count++;
+			}
+			n_instrs = m16_count;
+			goto mips_count_update;
 		}
-		return m16_count > 0 ? m16_count : 1;
 	}
 #endif
 
@@ -233,25 +238,7 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 			m88k_exception(cpu, M88K_EXCEPTION_INTERRUPT, 0);
 #endif
 #ifdef DYNTRANS_MIPS
-		int enabled, mask;
-		int status = cpu->cd.mips.coproc[0]->reg[COP0_STATUS];
-		if (cpu->cd.mips.cpu_type.exc_model == EXC3K) {
-			/*  R3000:  */
-			enabled = status & MIPS_SR_INT_IE;
-		} else {
-			/*  R4000 and others:  */
-			enabled = (status & STATUS_IE)
-			    && !(status & STATUS_EXL) && !(status & STATUS_ERL);
-			/*  Special case for R5900/C790/TX79:  */
-			if (cpu->cd.mips.cpu_type.rev == MIPS_R5900 &&
-			    !(status & R5900_STATUS_EIE))
-				enabled = 0;
-		}
-		mask = status & cpu->cd.mips.coproc[0]->reg[COP0_CAUSE]
-		    & STATUS_IM_MASK;
-
-		if (enabled && mask)
-			mips_cpu_exception(cpu, EXCEPTION_INT, 0, 0, 0, 0, 0,0);
+		mips_cpu_check_interrupts(cpu);
 #endif
 #ifdef DYNTRANS_PPC
 		if (cpu->cd.ppc.dec_intr_pending && cpu->cd.ppc.msr & PPC_MSR_EE) {
@@ -455,6 +442,7 @@ skip_pc_sync:
 #endif
 
 #ifdef DYNTRANS_MIPS
+mips_count_update:
 	/*  Update the count register (on everything except EXC3K):  */
 	if (cpu->cd.mips.cpu_type.exc_model != EXC3K) {
 		uint32_t old;
