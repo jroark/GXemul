@@ -457,6 +457,50 @@ static void vr41xx_keytick(struct cpu *cpu, struct vr41xx_data *d)
 
 
 /*
+ *  vr41xx_rtcl1_program():
+ *
+ *  Load the RTCL1 timer with a period of "ticks" 32.768 kHz clocks
+ *  (VR4131 UM 13.2.5). The counter restarts; 0 stops the timer.
+ */
+static void vr41xx_rtcl1_program(struct cpu *cpu, struct vr41xx_data *d,
+	uint32_t ticks)
+{
+	uint64_t emulated_hz = cpu->machine != NULL
+	    ? (uint64_t)cpu->machine->emulated_hz : 0;
+
+	if (emulated_hz == 0)
+		emulated_hz = 131072000ULL;
+
+	d->rtcl1_divisor = ticks;
+	d->rtcl1_cycle_accum = 0;
+	d->rtcl1_period_cycles = ticks == 0 ? 0 :
+	    (emulated_hz * (uint64_t)ticks) / (uint64_t)RTCL1_L_HZ;
+	if (ticks != 0 && d->rtcl1_period_cycles == 0)
+		d->rtcl1_period_cycles = 1;
+}
+
+
+/*
+ *  vr41xx_rtcl1_count():
+ *
+ *  The RTCL1 down-counter: 32.768 kHz clocks left before the next
+ *  underflow, counting the cycles since the last DEVICE_TICK.
+ */
+static uint32_t vr41xx_rtcl1_count(struct cpu *cpu, struct vr41xx_data *d)
+{
+	uint64_t done, left;
+
+	if (d->rtcl1_period_cycles == 0)
+		return 0;
+	done = d->rtcl1_cycle_accum + (cpu->ninstrs - d->last_cycle_sample);
+	done %= d->rtcl1_period_cycles;
+	left = d->rtcl1_period_cycles - done;
+	return (uint32_t)((left * d->rtcl1_divisor +
+	    d->rtcl1_period_cycles - 1) / d->rtcl1_period_cycles);
+}
+
+
+/*
  *  timer_tick():
  */
 static void timer_tick(struct timer *timer, void *extra)
@@ -533,12 +577,17 @@ DEVICE_TICK(vr41xx)
 		 * timer up after the first fire.
 		 */
 		d->rtcl1_cycle_accum += tick_cycles;
-		while (d->rtcl1_cycle_accum >= d->rtcl1_period_cycles) {
+		if (d->rtcl1_cycle_accum >= d->rtcl1_period_cycles) {
 			d->rtcl1_cycle_accum -= d->rtcl1_period_cycles;
 			timer_tick(NULL, d);
-			if (d->pending_timer_interrupts > 0)
-				break;
 		}
+		/*  One edge is delivered per DEVICE_TICK, so a backlog
+		    (the IRQ masked, a long WAIT) is replayed later; keep
+		    at most a few periods of it rather than an unbounded
+		    catch-up burst.  */
+		if (d->rtcl1_cycle_accum >= 4 * d->rtcl1_period_cycles)
+			d->rtcl1_cycle_accum = d->rtcl1_cycle_accum %
+			    d->rtcl1_period_cycles + d->rtcl1_period_cycles;
 	}
 
 	/*
@@ -883,43 +932,30 @@ DEVICE_ACCESS(vr41xx)
 
 	case 0xd0:	/*  RTCL1_L_REG_W (older VR41xx)  */
 	case 0x110:	/*  RTCL1_L_REG_W (VR4131 relocated)  */
-		if (writeflag == MEM_WRITE && idata != 0) {
-			uint64_t emulated_hz = cpu->machine != NULL
-			    ? (uint64_t)cpu->machine->emulated_hz : 0;
-
-			if (emulated_hz == 0)
-				emulated_hz = 131072000ULL;
-
-			d->rtcl1_divisor = (uint32_t)idata;
-			d->rtcl1_cycle_accum = 0;
-			d->rtcl1_period_cycles =
-			    (emulated_hz * (uint64_t)d->rtcl1_divisor)
-			    / (uint64_t)RTCL1_L_HZ;
-			if (d->rtcl1_period_cycles == 0)
-				d->rtcl1_period_cycles = 1;
-		}
-		if (d->cpumodel == 4131 && relative_addr == 0x110) {
-			uint32_t rtc_off = (uint32_t)(relative_addr - 0x100);
-
-			if (writeflag == MEM_READ)
-				odata = rtc_read(&d->rtc, rtc_off,
-				    (unsigned)len);
-			else
-				rtc_write(&d->rtc, rtc_off, (unsigned)len,
-				    (uint32_t)idata);
-		}
-		break;
 	case 0xd2:	/*  RTCL1_H_REG_W (older VR41xx)  */
 	case 0x112:	/*  RTCL1_H_REG_W (VR4131 relocated)  */
-		if (d->cpumodel == 4131 && relative_addr == 0x112) {
+		if (d->cpumodel == 4131 && relative_addr >= 0x110) {
 			uint32_t rtc_off = (uint32_t)(relative_addr - 0x100);
 
-			if (writeflag == MEM_READ)
+			if (writeflag == MEM_READ) {
 				odata = rtc_read(&d->rtc, rtc_off,
 				    (unsigned)len);
-			else
-				rtc_write(&d->rtc, rtc_off, (unsigned)len,
-				    (uint32_t)idata);
+				break;
+			}
+			rtc_write(&d->rtc, rtc_off, (unsigned)len,
+			    (uint32_t)idata);
+			/*  RTCL1 is a 24-bit reload value split over
+			    RTCL1LREG/RTCL1HREG (VR4131 UM 13.2.5); the
+			    period follows the whole register, whichever
+			    half was written.  */
+			vr41xx_rtcl1_program(cpu, d,
+			    d->rtc.rtcl1 & 0xffffff);
+		} else if (writeflag == MEM_WRITE &&
+		    (relative_addr == 0xd0 || relative_addr == 0x110) &&
+		    idata != 0) {
+			/*  Older VR41xx: the low half alone programs the
+			    timer, as before.  */
+			vr41xx_rtcl1_program(cpu, d, (uint32_t)idata);
 		}
 		break;
 
@@ -936,6 +972,17 @@ DEVICE_ACCESS(vr41xx)
 	case 0x10c:	/*  VR4131 ECMPHREG  */
 	case 0x114:	/*  VR4131 RTCL1CNTLREG  */
 	case 0x116:	/*  VR4131 RTCL1CNTHREG  */
+		if (d->cpumodel == 4131 && writeflag == MEM_READ &&
+		    (relative_addr == 0x114 || relative_addr == 0x116)) {
+			/*  The RTCL1 down-counter (VR4131 UM 13.2.6):
+			    32.768 kHz ticks left in this period.  */
+			uint32_t cnt = vr41xx_rtcl1_count(cpu, d);
+
+			odata = relative_addr == 0x114 ? (cnt & 0xffff)
+			    : ((cnt >> 16) & 0xff);
+			break;
+		}
+		/*  FALLTHROUGH  */
 	case 0x118:	/*  VR4131 RTCL2LREG  */
 	case 0x11a:	/*  VR4131 RTCL2HREG  */
 	case 0x11c:	/*  VR4131 RTCL2CNTLREG  */
