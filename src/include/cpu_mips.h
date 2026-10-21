@@ -244,6 +244,11 @@ struct mips_cpu {
 	 *  window (see memory/project_post_ppsh_stall.md pass 5-7).
 	 */
 	uint32_t	ip_edge_triggered_mask;
+	/*  Called after exception entry cleared some of those bits, so the
+	    interrupt controller that owns the line can resync (dev_vr41xx).  */
+	void		(*ip_edge_delivered)(void *extra,
+			    uint32_t cleared_ip_mask);
+	void		*ip_edge_delivered_extra;
 
 	/*  MIPS16 compact encoding mode:  */
 	int		mips16;		/*  1 = currently in MIPS16 mode  */

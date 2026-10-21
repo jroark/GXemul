@@ -48,14 +48,6 @@
 #include "memory.h"
 #include "mips_cpu_types.h"
 
-/*
- *  Optional callback from the VR41xx device so that it can resync its
- *  internal pending state when the CPU takes an edge-triggered interrupt
- *  exception. Defined weakly so non-VR41xx builds don't need to provide
- *  a stub.
- */
-extern void vr41xx_on_interrupt_delivered(struct cpu *cpu,
-    uint32_t cleared_ip_mask) __attribute__((weak));
 #include "opcodes_mips.h"
 #include "settings.h"
 #include "symbol.h"
@@ -2120,8 +2112,10 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 		    cpu->cd.mips.ip_edge_triggered_mask);
 		reg[COP0_CAUSE] &=
 		    ~(uint64_t)cpu->cd.mips.ip_edge_triggered_mask;
-		if (&vr41xx_on_interrupt_delivered != NULL)
-			vr41xx_on_interrupt_delivered(cpu, cleared_ip_mask);
+		if (cpu->cd.mips.ip_edge_delivered != NULL)
+			cpu->cd.mips.ip_edge_delivered(
+			    cpu->cd.mips.ip_edge_delivered_extra,
+			    cleared_ip_mask);
 	}
 
 	/*  Sign-extend:  */

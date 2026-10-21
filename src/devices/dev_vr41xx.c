@@ -114,11 +114,6 @@ struct vr41xx_data {
 	uint8_t		sdramu_regs[0x10];
 };
 
-/* Public: the DSIU (VR4131 Debug SIU) ns16550 console handle, captured
- * when the device is registered so the BE-300 machine layer can push
- * keystrokes into it directly. -1 until set. */
-int dev_vr41xx_dsiu_console_handle = -1;
-
 
 static uint64_t vr41xx_latch_read(const uint8_t *regs, uint32_t off,
 	unsigned len)
@@ -197,7 +192,8 @@ int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
 /*
  *  vr41xx_on_interrupt_delivered():
  *
- *  Called by mips_cpu_exception() when the CPU takes an EXCEPTION_INT
+ *  The CPU's ip_edge_delivered hook: called by mips_cpu_exception() when
+ *  the CPU takes an EXCEPTION_INT
  *  whose CAUSE.IP bits include any of ip_edge_triggered_mask. This lets
  *  the VRIP aggregator resync its internal latches now that the CPU has
  *  delivered the edge.
@@ -207,12 +203,11 @@ int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
  *  and 13.2.9). Other enabled level sources such as GIU/touch must keep
  *  IP2 asserted after the CPU-side edge latch is cleared.
  */
-void vr41xx_on_interrupt_delivered(struct cpu *cpu, uint32_t cleared_ip_mask)
+static void vr41xx_on_interrupt_delivered(void *extra,
+	uint32_t cleared_ip_mask)
 {
-	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
-	(void)cpu;
-	if (d == NULL)
-		return;
+	struct vr41xx_data *d = (struct vr41xx_data *) extra;
+
 	/*  CAUSE bit 10 == IP2 (STATUS_IM_SHIFT + 2). If that's in the
 	    cleared mask, consume the RTCL1 edge.  */
 	if ((cleared_ip_mask & (1u << 10)) != 0 && d->rtcl1_irq_asserted) {
@@ -1153,6 +1148,8 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	{
 		struct cpu *c = machine->cpus[machine->bootstrap_cpu];
 		c->cd.mips.ip_edge_triggered_mask |= (1u << 10);
+		c->cd.mips.ip_edge_delivered = vr41xx_on_interrupt_delivered;
+		c->cd.mips.ip_edge_delivered_extra = d;
 	}
 	g_vr41xx_for_edge_cb = d;
 
@@ -1298,8 +1295,7 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 		    "addr=0x%" PRIx64" in_use=0 name2=dsiu", machine->path,
 		    machine->bootstrap_cpu, VRIP_INTR_DSIU,
 		    (uint64_t) (baseaddr+0x820));
-		dev_vr41xx_dsiu_console_handle = (int)(size_t)
-		    device_add(machine, tmps);
+		device_add(machine, tmps);
 	} else {
 		/*  This is used by Linux and NetBSD:  */
 		snprintf(tmps, sizeof(tmps), "ns16550 irq=%s.cpu[%i]."
