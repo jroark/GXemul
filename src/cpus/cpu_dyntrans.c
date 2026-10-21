@@ -392,7 +392,19 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 #endif
 
 	if (cpu->wants_to_idle) {
+#ifdef DYNTRANS_MIPS
+		/*
+		 *  WAIT/STANDBY: the CPU stops, but time does not. Keep the
+		 *  idle break as elapsed cycles, so Count, Compare and the
+		 *  VR41xx timers (and the host's speed throttle, which paces
+		 *  on ninstrs) see a waiting batch as N_DYNTRANS_IDLE_BREAK
+		 *  cycles. Taking it off made an idle WinCE shell advance
+		 *  about 1.8M of its 131M cycles per host second, so its
+		 *  timers barely moved while it waited for them.
+		 */
+#else
 		cpu->n_translated_instrs -= N_DYNTRANS_IDLE_BREAK;
+#endif
 
 		// TODO: More arch specific interrupt checks
 		if (false
