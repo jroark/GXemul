@@ -92,7 +92,7 @@ struct vr41xx_data {
 	uint64_t	rtcl1_period_cycles;
 	uint64_t	etime_cycle_accum;
 	uint64_t	etime_period_cycles;
-	uint32_t	last_count_sample;	/* for DEVICE_TICK cycle delta */
+	uint64_t	last_cycle_sample;	/* cpu->ninstrs at the last DEVICE_TICK */
 
 	/*  See icureg.h in NetBSD for more info.  */
 	uint16_t	sysint1;
@@ -489,37 +489,21 @@ DEVICE_TICK(vr41xx)
 	if (emulated_hz == 0)
 		emulated_hz = 131072000ULL;
 	/*
-	 * Use CP0 Count delta as the true elapsed-cycles measure since the
-	 * last DEVICE_TICK call. Dyntrans batches terminate early (exceptions,
-	 * page boundaries) so the callback fires far more often than the
-	 * nominal 1<<TICKSHIFT cycle interval — treating the tick interval as
-	 * a fixed 1<<TICKSHIFT causes accum to grow 10-100× too fast and
-	 * RTCL1 to assert on nearly every DEVICE_TICK (observed ~131 kHz vs
-	 * 1 kHz spec for WinCE NK). See memory/project_post_ppsh_stall.md
-	 * Pass 8.
+	 * Time the RTC, RTCL1 and the PMU HALTimer from emulated cycles:
+	 * cpu->ninstrs, one cycle per instruction at emulated_hz. Dyntrans
+	 * batches end early (exceptions, page boundaries), so this callback
+	 * runs more often than its nominal interval and must measure what
+	 * actually elapsed. CP0 Count was used before, but the guest can
+	 * write it and it runs at a different rate.
 	 */
 	{
-		uint32_t cur_count =
-		    (uint32_t)cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
-		uint32_t count_delta = cur_count - d->last_count_sample;
-		d->last_count_sample = cur_count;
-		/*
-		 * Clamp to a sane upper bound on the first call / after
-		 * Count-register writes by the guest, so a 32-bit wraparound
-		 * or guest-driven reset doesn't inject a 4 GB cycle burst.
-		 */
-		if (count_delta > (uint32_t)(1U << DEV_VR41XX_TICKSHIFT) * 4)
-			count_delta = (uint32_t)(1U << DEV_VR41XX_TICKSHIFT);
-		tick_cycles = count_delta;
+		uint64_t now = cpu->ninstrs;
 
-		/*
-		 * Pet / fire the PMU HALTimer watchdog (UM §12.2.2). Mask
-		 * to 32 bits because COP0_COUNT is stored sign-extended
-		 * (cpu_dyntrans.c:469 uses `(int32_t)(old + n_instrs)`),
-		 * so feeding the raw uint64_t drives the PMU delta math
-		 * negative across the 0x80000000 boundary.
-		 */
-		pmu_tick(&d->pmu, (uint64_t) cur_count);
+		tick_cycles = now - d->last_cycle_sample;
+		d->last_cycle_sample = now;
+
+		/*  Pet / fire the PMU HALTimer watchdog (UM §12.2.2).  */
+		pmu_tick(&d->pmu, now);
 	}
 
 	if (d->etime_period_cycles == 0) {
@@ -865,11 +849,9 @@ DEVICE_ACCESS(vr41xx)
 				 * handle) and drive the cold-reset thunk.
 				 */
 				if (d->pmu.softrst_pending) {
-					uint64_t cur_count = (uint32_t)
-					    cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
 					d->pmu.softrst_pending = 0;
 					pmu_apply_pending_reset_state(&d->pmu,
-					    cur_count);
+					    cpu->ninstrs);
 					if (d->pmu.cold_reset != NULL)
 						d->pmu.cold_reset(d->pmu.cpu_opaque);
 				}
@@ -1197,20 +1179,14 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	 * that must be petted via PMUCNTREG bit 2 or the CPU is cold-reset
 	 * with SDRAM preserved.
 	 *
-	 * Count rate: gxemul's dyntrans increments COP0_COUNT by n_instrs
-	 * per batch (cpu_dyntrans.c:469), so in-emulator Count advances at
-	 * ~emulated_hz, not CPU/2. The hz/2 cadence fix in
-	 * cpu_mips_coproc.c only affects the Compare wall-clock timer, not
-	 * Count itself. Using emulated_hz * 4 here gives ~4 seconds of
-	 * emulated time on the same clock basis as all other Count-driven
-	 * timers in this tree.
+	 * The window is in emulated cycles (cpu->ninstrs at emulated_hz),
+	 * the same clock DEVICE_TICK uses for the RTC and RTCL1.
 	 */
 	if (cpumodel == 4131) {
 		struct cpu *c0 = machine->cpus[machine->bootstrap_cpu];
-		uint64_t cur_count = (uint32_t)
-		    c0->cd.mips.coproc[0]->reg[COP0_COUNT];
 		uint64_t arm_cycles = (uint64_t)machine->emulated_hz * 4;
-		pmu_arm_initial(&d->pmu, cur_count, arm_cycles,
+		d->last_cycle_sample = c0->ninstrs;
+		pmu_arm_initial(&d->pmu, c0->ninstrs, arm_cycles,
 		    vr41xx_issue_cold_reset_thunk, c0);
 	}
 
