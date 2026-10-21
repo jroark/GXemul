@@ -782,7 +782,7 @@ void coproc_register_write(struct cpu *cpu,
 			/*
 			 * The Compare interrupt follows emulated progress, not
 			 * host time: cpu_dyntrans.c asserts it when Count (one
-			 * tick per two cycles, VR4131 UM §7.1) crosses Compare.
+			 * tick per count_div cycles) crosses Compare.
 			 */
 			/*  Clear the timer interrupt assertion (bit 7):  */
 			cp->reg[COP0_CAUSE] &= ~0x8000;

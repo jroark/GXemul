@@ -227,7 +227,8 @@ struct mips_cpu {
 
 	/*  Count/compare timer:  */
 	int		compare_register_set;
-	uint32_t	count_half_cycle;	/*  cycle left over from Count += n/2  */
+	uint32_t	count_div;		/*  CPU cycles per Count tick  */
+	uint32_t	count_cycle_carry;	/*  cycles not yet worth a tick  */
 	int32_t		count_register_read_count;
 	struct interrupt irq_compare;
 

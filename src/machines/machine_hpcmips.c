@@ -149,6 +149,16 @@ MACHINE_SETUP(hpcmips)
 		 */
 		machine->machine_name = strdup("Casio Cassiopeia BE-300");
 		machine->emulated_hz = 165888000;
+		/*
+		 *  This VR4131 (PRId 0x0c80) increments Count at TClock/4,
+		 *  10.368 MHz: Linux's vr41xx plat_time_init() uses tclock/4
+		 *  for every VR41xx but VR4131 rev 2.x (tclock/2), and its
+		 *  BE-300 ports report a 10 MHz sched_clock, and WinCE 3.0's
+		 *  OAL sets Compare = Count + 10368 for its 1 ms tick. That is
+		 *  one Count tick per 16 PClock cycles; at the R4000's PClock/2
+		 *  rate, Count ran 8x fast and WinCE's tick with it.
+		 */
+		cpu->cd.mips.count_div = 165888000 / (41472000 / 4);
 		hpc_fb_addr = 0x0a200000;
 		hpc_fb_xsize = machine->hpcmips_fb_width ?
 		    machine->hpcmips_fb_width : 240;
