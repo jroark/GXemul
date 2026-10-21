@@ -33,7 +33,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "console.h"
 #include "cpu.h"
@@ -55,6 +54,7 @@
 #define	DEV_NS16550_LENGTH	8
 
 struct ns_data {
+	struct machine	*machine;
 	int		addrmult;
 	int		in_use;
 	const char	*name;
@@ -145,13 +145,21 @@ static int ns16550_be300_companion_siu(struct ns_data *d, int pcconnect_active)
 	return pcconnect_active && d->name && strcmp(d->name, "vrc4173siu") == 0;
 }
 
-static uint64_t ns16550_mono_ns(void)
+/*
+ *  Emulated time, for the receive timeout: it is measured in character
+ *  times on the guest's serial line, so host speed must not change when
+ *  it fires. Never 0 (0 means no timeout is running).
+ */
+static uint64_t ns16550_now_ns(struct ns_data *d)
 {
-	struct timespec ts;
+	struct machine *m = d->machine;
+	uint64_t hz = m && m->emulated_hz > 0 ? (uint64_t)m->emulated_hz :
+	    131072000ull;
+	uint64_t cycles = m && m->ncpus > 0 ?
+	    m->cpus[m->bootstrap_cpu]->ninstrs : 0;
 
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-		return 0;
-	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+	return cycles / hz * 1000000000ull +
+	    cycles % hz * 1000000000ull / hz + 1;
 }
 
 static size_t ns16550_backend_rx_count(struct ns_data *d, int pcconnect_active,
@@ -178,7 +186,7 @@ static size_t ns16550_rx_count(struct ns_data *d, int pcconnect_active,
 	if (rx_count == 0) {
 		d->rx_timeout_start_ns = 0;
 	} else if (d->rx_last_count == 0 || rx_count > d->rx_last_count) {
-		d->rx_timeout_start_ns = ns16550_mono_ns();
+		d->rx_timeout_start_ns = ns16550_now_ns(d);
 	}
 	d->rx_last_count = rx_count;
 	return rx_count;
@@ -245,9 +253,8 @@ static unsigned char ns16550_rx_iir_reason(struct ns_data *d, size_t rx_count,
 	if (d->rx_timeout_start_ns == 0)
 		return IIR_NOPEND;
 
-	now = ns16550_mono_ns();
-	if (now != 0 &&
-	    now - d->rx_timeout_start_ns >=
+	now = ns16550_now_ns(d);
+	if (now - d->rx_timeout_start_ns >=
 	    ns16550_rx_timeout_ns(d, pcconnect_active))
 		return IIR_RXTOUT;
 	return IIR_NOPEND;
@@ -727,6 +734,7 @@ DEVINIT(ns16550)
 	CHECK_ALLOCATION(d = (struct ns_data *) malloc(sizeof(struct ns_data)));
 	memset(d, 0, sizeof(struct ns_data));
 
+	d->machine	= devinit->machine;
 	d->addrmult	= devinit->addr_mult;
 	d->in_use	= devinit->in_use;
 	d->enable_fifo	= 1;
