@@ -220,6 +220,11 @@ struct mips_cpu {
 
 	int		last_written_tlb_index;
 
+	/*  A MIPS16 mode switch ends the dyntrans batch early; the number of
+	    instructions actually run before it (cpu_dyntrans.c restores it).  */
+	int		batch_cut;
+	int		batch_cut_instrs;
+
 	/*  Count/compare timer:  */
 	int		compare_register_set;
 	int64_t		compare_countdown_cycles;

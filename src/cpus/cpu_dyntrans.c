@@ -392,6 +392,18 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 		}
 	}
 
+#ifdef DYNTRANS_MIPS
+	/*  A MIPS16 switch cut the batch short (MIPS_END_BATCH): count what
+	    ran before it plus the block the loop finished afterwards (the
+	    nothing_call spins in that block already took themselves off
+	    ninstrs), not the forced limit.  */
+	if (cpu->cd.mips.batch_cut) {
+		cpu->n_translated_instrs = cpu->cd.mips.batch_cut_instrs +
+		    (cpu->n_translated_instrs - N_SAFE_DYNTRANS_LIMIT);
+		cpu->cd.mips.batch_cut = 0;
+	}
+#endif
+
 	if (cpu->wants_to_idle) {
 		cpu->n_translated_instrs -= N_DYNTRANS_IDLE_BREAK;
 

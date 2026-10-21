@@ -1047,6 +1047,21 @@ X(bgtzl_samepage)
 
 
 /*
+ *  End the dyntrans batch at a switch into MIPS16, which runs in its own
+ *  interpreter. Setting n_translated_instrs to the limit makes the loop
+ *  exit, but run_instr would also count the rest of the batch (up to 8191
+ *  instructions that never ran) into Count and the device timers, so
+ *  remember how many really ran; cpu_dyntrans.c restores it.
+ */
+#define	MIPS_END_BATCH(cpu)	do {					\
+		(cpu)->cd.mips.batch_cut = 1;				\
+		(cpu)->cd.mips.batch_cut_instrs = (cpu)->n_translated_instrs; \
+		(cpu)->cd.mips.next_ic = &nothing_call;			\
+		(cpu)->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;	\
+	} while (0)
+
+
+/*
  *  jr, jalr: Jump to a register [and link].
  *
  *  arg[0] = ptr to rs
@@ -1065,8 +1080,7 @@ X(jr)
 			/*  Switch to MIPS16 mode  */
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
-			cpu->cd.mips.next_ic = &nothing_call;
-			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+			MIPS_END_BATCH(cpu);
 		} else if (rs & 3) {
 			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
 			return;
@@ -1088,8 +1102,7 @@ X(jr_ra)
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
-			cpu->cd.mips.next_ic = &nothing_call;
-			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+			MIPS_END_BATCH(cpu);
 		} else if (rs & 3) {
 			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
 			return;
@@ -1109,8 +1122,7 @@ X(jr_ra_addiu)
 	if (rs & 1) {
 		cpu->cd.mips.mips16 = 1;
 		cpu->pc = rs & ~(MODE_int_t)1;
-		cpu->cd.mips.next_ic = &nothing_call;
-		cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+		MIPS_END_BATCH(cpu);
 	} else if (rs & 3) {
 		MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
 		return;
@@ -1132,8 +1144,7 @@ X(jr_ra_trace)
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu_functioncall_trace_return(cpu);
-			cpu->cd.mips.next_ic = &nothing_call;
-			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+			MIPS_END_BATCH(cpu);
 		} else if (rs & 3) {
 			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
 			return;
@@ -1160,8 +1171,7 @@ X(jalr)
 		if (rs & 1) {
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
-			cpu->cd.mips.next_ic = &nothing_call;
-			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+			MIPS_END_BATCH(cpu);
 		} else if (rs & 3) {
 			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
 			return;
@@ -1188,8 +1198,7 @@ X(jalr_trace)
 			cpu->cd.mips.mips16 = 1;
 			cpu->pc = rs & ~(MODE_int_t)1;
 			cpu_functioncall_trace(cpu, cpu->pc);
-			cpu->cd.mips.next_ic = &nothing_call;
-			cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+			MIPS_END_BATCH(cpu);
 		} else if (rs & 3) {
 			MIPS_RAISE_BAD_JUMP_TARGET(cpu, rs, 0);
 			return;
@@ -1281,8 +1290,7 @@ X(jalx)
 		cpu->cd.mips.mips16 = 1;
 		if (cpu->machine->show_trace_tree)
 			cpu_functioncall_trace(cpu, cpu->pc);
-		cpu->cd.mips.next_ic = &nothing_call;
-		cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+		MIPS_END_BATCH(cpu);
 	} else
 		cpu->delay_slot = NOT_DELAYED;
 }
@@ -2428,8 +2436,7 @@ X(eret)
 		 *  because the IC page contains stale MIPS32 translations.
 		 *  Use nothing_call to drain the unrolled IC loop; the MIPS16
 		 *  check at the top of DYNTRANS_RUN_INSTR_DEF will catch it. */
-		cpu->cd.mips.next_ic = &nothing_call;
-		cpu->n_translated_instrs = N_SAFE_DYNTRANS_LIMIT;
+		MIPS_END_BATCH(cpu);
 	} else {
 		quick_pc_to_pointers(cpu);
 	}
