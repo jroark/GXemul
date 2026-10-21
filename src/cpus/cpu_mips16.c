@@ -457,8 +457,7 @@ static int m16_memory_rw(struct cpu *cpu, uint64_t addr,
 	unsigned char *buf, int len, int writeflag)
 {
 	return cpu->memory_rw(cpu, cpu->mem, addr, buf, len,
-	    writeflag ? MEM_WRITE : MEM_READ,
-	    writeflag ? CACHE_DATA : CACHE_DATA);
+	    writeflag ? MEM_WRITE : MEM_READ, CACHE_DATA);
 }
 
 
@@ -1362,9 +1361,6 @@ int mips_cpu_interpret_mips16_SLOW(struct cpu *cpu)
 				break;
 			case M16_RRR_SUBU:
 				{
-					static int subu_diag = 0;
-					uint32_t rpc =
-					    (uint32_t)cpu->pc & 0x3FFF;
 					uint32_t s1v =
 					    (uint32_t)M16REG(rx);
 					uint32_t s2v =
