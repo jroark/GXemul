@@ -451,23 +451,26 @@ mips_count_update:
 		cpu->cd.mips.count_register_read_count = 0;
 		old = cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
 		diff1 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] - old;
-		cpu->cd.mips.coproc[0]->reg[COP0_COUNT] =
-		    (int32_t) (old + n_instrs);
+		/*
+		 *  Count runs at half the pipeline clock (VR4131 UM §7.1,
+		 *  as on the R4000); the emulator runs one instruction per
+		 *  cycle at emulated_hz, so Count gains one per two
+		 *  instructions, carrying the odd one over.
+		 */
+		{
+			uint64_t cycles = (uint64_t)n_instrs +
+			    cpu->cd.mips.count_half_cycle;
+			cpu->cd.mips.count_half_cycle = cycles & 1;
+			cpu->cd.mips.coproc[0]->reg[COP0_COUNT] =
+			    (int32_t) (old + (uint32_t)(cycles >> 1));
+		}
 		diff2 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] -
 		    cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
 
-		if (cpu->cd.mips.compare_register_set) {
-			if (cpu->cd.mips.compare_countdown_cycles > 0) {
-				cpu->cd.mips.compare_countdown_cycles -= n_instrs;
-				if (cpu->cd.mips.compare_countdown_cycles <= 0) {
-					cpu->cd.mips.compare_countdown_cycles = 0;
-					INTERRUPT_ASSERT(
-					    cpu->cd.mips.irq_compare);
-				}
-			} else if (diff1 > 0 && diff2 <= 0)
-				INTERRUPT_ASSERT(
-				    cpu->cd.mips.irq_compare);
-		}
+		/*  Compare interrupt when Count reaches Compare.  */
+		if (cpu->cd.mips.compare_register_set &&
+		    diff1 > 0 && diff2 <= 0)
+			INTERRUPT_ASSERT(cpu->cd.mips.irq_compare);
 	}
 #endif
 #ifdef DYNTRANS_PPC

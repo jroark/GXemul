@@ -573,30 +573,9 @@ void coproc_register_read(struct cpu *cpu,
 	if (cp->coproc_nr==0 && reg_nr==COP0_WIRED)	unimpl = 0;
 	if (cp->coproc_nr==0 && reg_nr==COP0_BADVADDR)	unimpl = 0;
 	if (cp->coproc_nr==0 && reg_nr==COP0_COUNT) {
-		uint32_t old_count = (uint32_t)cp->reg[COP0_COUNT];
-
 		/*  TODO: Increase count in a more meaningful way!  */
 		cp->reg[COP0_COUNT] = (int32_t) (cp->reg[COP0_COUNT] + 1);
 		cpu->cd.mips.count_register_read_count ++;
-
-		/*
-		 * VR4131 UM section 7.1: CP0 Compare asserts interrupt 7 when
-		 * Count reaches Compare. GXemul makes Count visibly advance
-		 * on MFC0 Count reads so tight polling loops can observe
-		 * time; keep Compare delivery synchronous with that visible
-		 * Count value, not only with the later dyntrans batch flush.
-		 */
-		if (cpu->cd.mips.compare_register_set) {
-			uint32_t count = (uint32_t)cp->reg[COP0_COUNT];
-			uint32_t compare = (uint32_t)cp->reg[COP0_COMPARE];
-			int32_t diff1 = compare - old_count;
-			int32_t diff2 = compare - count;
-
-			if (diff1 > 0 && diff2 <= 0) {
-				cpu->cd.mips.compare_countdown_cycles = 0;
-				INTERRUPT_ASSERT(cpu->cd.mips.irq_compare);
-			}
-		}
 
 		unimpl = 0;
 	}
@@ -784,22 +763,10 @@ void coproc_register_write(struct cpu *cpu,
 			break;
 		case COP0_COMPARE:
 			/*
-			 * Drive CP0 Compare from emulated instruction progress,
-			 * not the host SIGALRM timer. VR4131 UM §7.1 and the
-			 * R4000 Count/Compare model define Count as a CPU/2
-			 * timebase; the guest-visible Compare interrupt must
-			 * therefore follow emulated CPU progress, not host time.
-			 * This emulator currently advances COP0_COUNT once per
-			 * guest instruction, so convert the guest's Count delta to
-			 * instruction cycles with *2 here. Host-wall-clock delivery
-			 * makes WinCE scheduler ticks trace-speed dependent.
+			 * The Compare interrupt follows emulated progress, not
+			 * host time: cpu_dyntrans.c asserts it when Count (one
+			 * tick per two cycles, VR4131 UM §7.1) crosses Compare.
 			 */
-			cpu->cd.mips.compare_countdown_cycles =
-			    (int64_t)((uint32_t)tmp -
-			    (uint32_t)cp->reg[COP0_COUNT]) * 2;
-			if (cpu->cd.mips.compare_countdown_cycles <= 0)
-				cpu->cd.mips.compare_countdown_cycles = 1;
-
 			/*  Clear the timer interrupt assertion (bit 7):  */
 			cp->reg[COP0_CAUSE] &= ~0x8000;
 			INTERRUPT_DEASSERT(cpu->cd.mips.irq_compare);
