@@ -573,9 +573,26 @@ void coproc_register_read(struct cpu *cpu,
 	if (cp->coproc_nr==0 && reg_nr==COP0_WIRED)	unimpl = 0;
 	if (cp->coproc_nr==0 && reg_nr==COP0_BADVADDR)	unimpl = 0;
 	if (cp->coproc_nr==0 && reg_nr==COP0_COUNT) {
+		uint32_t old_count = (uint32_t)cp->reg[COP0_COUNT];
+
 		/*  TODO: Increase count in a more meaningful way!  */
 		cp->reg[COP0_COUNT] = (int32_t) (cp->reg[COP0_COUNT] + 1);
 		cpu->cd.mips.count_register_read_count ++;
+
+		/*
+		 *  Count reaching Compare raises IP7 (VR4131 UM §7.1), also
+		 *  when this read is what moved it there: the batch-end
+		 *  check in cpu_dyntrans.c only sees Count from here on.
+		 *  Linux's cevt-r4k probe polls Count past a near Compare
+		 *  and then requires Cause.IP7.
+		 */
+		if (cpu->cd.mips.compare_register_set) {
+			uint32_t compare = (uint32_t)cp->reg[COP0_COMPARE];
+
+			if ((int32_t)(compare - old_count) > 0 &&
+			    (int32_t)(compare - (old_count + 1)) <= 0)
+				INTERRUPT_ASSERT(cpu->cd.mips.irq_compare);
+		}
 
 		unimpl = 0;
 	}
