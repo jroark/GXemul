@@ -2140,10 +2140,14 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 	 */
 	if (exccode == EXCEPTION_INT &&
 	    cpu->cd.mips.ip_edge_triggered_mask != 0) {
+		/*  Only an edge the CPU could have taken (its Status.IM
+		    bit set, same bit position as Cause.IP) is delivered by
+		    this exception; a masked edge stays pending.  */
+		uint32_t deliverable = cpu->cd.mips.ip_edge_triggered_mask &
+		    (uint32_t)reg[COP0_STATUS] & STATUS_IM_MASK;
 		uint32_t cleared_ip_mask = (uint32_t)(reg[COP0_CAUSE] &
-		    cpu->cd.mips.ip_edge_triggered_mask);
-		reg[COP0_CAUSE] &=
-		    ~(uint64_t)cpu->cd.mips.ip_edge_triggered_mask;
+		    deliverable);
+		reg[COP0_CAUSE] &= ~(uint64_t)deliverable;
 		if (cpu->cd.mips.ip_edge_delivered != NULL)
 			cpu->cd.mips.ip_edge_delivered(
 			    cpu->cd.mips.ip_edge_delivered_extra,
