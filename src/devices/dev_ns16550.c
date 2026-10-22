@@ -41,9 +41,7 @@
 #include "machine.h"
 #include "memory.h"
 #include "misc.h"
-#include "pcconnect.h"
-#include "pcconnect_bridge.h"
-#include "stowaway.h"
+#include "ns16550_backend.h"
 
 #include "thirdparty/comreg.h"
 
@@ -79,13 +77,27 @@ struct ns_data {
 	uint64_t	rx_timeout_start_ns;
 };
 
+static ns16550_backend_resolver_t ns16550_backend_resolver;
+
+void ns16550_set_backend_resolver(ns16550_backend_resolver_t resolver)
+{
+	ns16550_backend_resolver = resolver;
+}
+
+static const struct ns16550_backend *ns16550_backend(struct ns_data *d)
+{
+	return ns16550_backend_resolver != NULL ?
+	    ns16550_backend_resolver(d->name) : NULL;
+}
+
 static void ns16550_update_tx_ready(struct ns_data *d)
 {
 	d->reg[com_lsr] |= LSR_TXRDY | LSR_TSRE;
 }
 
 static void ns16550_update_modem_status(struct ns_data *d,
-	int pcconnect_active, int pcconnect_rx_pending)
+	const struct ns16550_backend *b, int pcconnect_active,
+	int pcconnect_rx_pending)
 {
 	unsigned char old_lines;
 	unsigned char new_lines;
@@ -122,7 +134,7 @@ static void ns16550_update_modem_status(struct ns_data *d,
 		d->reg[com_msr] = MSR_DCD | MSR_DSR | MSR_CTS | delta;
 		return;
 	} else if (pcconnect_active) {
-		new_lines = pcconnect_cable_connected() ?
+		new_lines = b->cable_connected == NULL || b->cable_connected() ?
 		    (MSR_DCD | MSR_DSR | MSR_CTS) : 0;
 	} else {
 		new_lines = MSR_DCD | MSR_DSR | MSR_CTS;
@@ -162,27 +174,22 @@ static uint64_t ns16550_now_ns(struct ns_data *d)
 	    cycles % hz * 1000000000ull / hz + 1;
 }
 
-static size_t ns16550_backend_rx_count(struct ns_data *d, int pcconnect_active,
-	int stowaway_active, int serial_bridge_active)
+static size_t ns16550_backend_rx_count(struct ns_data *d,
+	const struct ns16550_backend *b)
 {
-	if (pcconnect_active)
-		return pcconnect_uart_rx_count();
-	if (stowaway_active)
-		return stowaway_uart_rx_count();
-	if (serial_bridge_active)
-		return serial_bridge_uart_rx_count(d->name);
+	if (b != NULL)
+		return b->rx_count(d->name);
 	if (console_charavail(d->console_handle))
 		return 1;
 	return 0;
 }
 
-static size_t ns16550_rx_count(struct ns_data *d, int pcconnect_active,
-	int stowaway_active, int serial_bridge_active)
+static size_t ns16550_rx_count(struct ns_data *d,
+	const struct ns16550_backend *b)
 {
 	size_t rx_count;
 
-	rx_count = ns16550_backend_rx_count(d, pcconnect_active,
-	    stowaway_active, serial_bridge_active);
+	rx_count = ns16550_backend_rx_count(d, b);
 	if (rx_count == 0) {
 		d->rx_timeout_start_ns = 0;
 	} else if (d->rx_last_count == 0 || rx_count > d->rx_last_count) {
@@ -210,13 +217,14 @@ static size_t ns16550_rx_fifo_trigger(struct ns_data *d)
 	}
 }
 
-static uint64_t ns16550_rx_timeout_ns(struct ns_data *d, int pcconnect_active)
+static uint64_t ns16550_rx_timeout_ns(struct ns_data *d,
+	const struct ns16550_backend *b, int pcconnect_active)
 {
 	uint32_t pcconnect_baud;
 	int divisor;
 
 	if (ns16550_be300_companion_siu(d, pcconnect_active)) {
-		pcconnect_baud = pcconnect_uart_baud();
+		pcconnect_baud = b->baud != NULL ? b->baud() : 0;
 		if (pcconnect_baud == 0)
 			pcconnect_baud = 115200u;
 		/*
@@ -240,7 +248,7 @@ static uint64_t ns16550_rx_timeout_ns(struct ns_data *d, int pcconnect_active)
 }
 
 static unsigned char ns16550_rx_iir_reason(struct ns_data *d, size_t rx_count,
-	int pcconnect_active)
+	const struct ns16550_backend *b, int pcconnect_active)
 {
 	uint64_t now;
 
@@ -255,7 +263,7 @@ static unsigned char ns16550_rx_iir_reason(struct ns_data *d, size_t rx_count,
 
 	now = ns16550_now_ns(d);
 	if (now - d->rx_timeout_start_ns >=
-	    ns16550_rx_timeout_ns(d, pcconnect_active))
+	    ns16550_rx_timeout_ns(d, b, pcconnect_active))
 		return IIR_RXTOUT;
 	return IIR_NOPEND;
 }
@@ -291,10 +299,10 @@ DEVICE_TICK(ns16550)
 	 *  transmitter slot is empty (i.e. the ns16550 is ready to transmit).
 	 */
 	struct ns_data *d = (struct ns_data *) extra;
-	int pcconnect_active = pcconnect_ns16550_claims(d->name);
-	int stowaway_active = !pcconnect_active && stowaway_ns16550_claims(d->name);
-	int serial_bridge_active = !pcconnect_active && !stowaway_active &&
-	    serial_bridge_ns16550_claims(d->name);
+	const struct ns16550_backend *b = ns16550_backend(d);
+	int pcconnect_active = b && b->kind == NS16550_BACKEND_PCCONNECT;
+	int stowaway_active = b && b->kind == NS16550_BACKEND_STOWAWAY;
+	int serial_bridge_active = b && b->kind == NS16550_BACKEND_SERIAL_BRIDGE;
 	int serial_peer_active = pcconnect_active || stowaway_active;
 	int modem_pending = 0;
 	size_t rx_count;
@@ -304,14 +312,15 @@ DEVICE_TICK(ns16550)
 	unsigned char iir_reason = IIR_NOPEND;
 	int pcconnect_tx_irq_pending;
 
-	rx_count = ns16550_rx_count(d, pcconnect_active, stowaway_active,
-	    serial_bridge_active);
+	rx_count = ns16550_rx_count(d, b);
 	rx_data_pending = rx_count > 0;
-	rx_iir_reason = ns16550_rx_iir_reason(d, rx_count, pcconnect_active);
+	rx_iir_reason = ns16550_rx_iir_reason(d, rx_count, b,
+	    pcconnect_active);
 
 	if (pcconnect_active) {
 		ns16550_update_tx_ready(d);
-		ns16550_update_modem_status(d, pcconnect_active, rx_data_pending);
+		ns16550_update_modem_status(d, b, pcconnect_active,
+		    rx_data_pending);
 		modem_pending = (d->reg[com_msr] &
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS)) != 0;
 	} else if (stowaway_active) {
@@ -325,7 +334,7 @@ DEVICE_TICK(ns16550)
 		 * data; expose the one-shot CTS delta while preserving normal
 		 * DCD/DSR/CTS levels.
 		 */
-		if (stowaway_uart_take_modem_delta())
+		if (b->take_modem_delta != NULL && b->take_modem_delta())
 			delta |= MSR_DCTS;
 		ns16550_update_tx_ready(d);
 		d->reg[com_msr] = delta | MSR_DCD | MSR_DSR | MSR_CTS;
@@ -399,7 +408,8 @@ DEVICE_TICK(ns16550)
 		 * Raise that companion subsource when THRE becomes the UART
 		 * IIR reason so serial.dll can drain its transmit queue.
 		 */
-		pcconnect_signal_uart_irq();
+		if (b->signal_irq != NULL)
+			b->signal_irq();
 	}
 	d->pcconnect_tx_irq_was_pending = pcconnect_tx_irq_pending;
 
@@ -430,10 +440,10 @@ DEVICE_ACCESS(ns16550)
 	uint64_t idata = 0, odata=0;
 	size_t i;
 	struct ns_data *d = (struct ns_data *) extra;
-	int pcconnect_active = pcconnect_ns16550_claims(d->name);
-	int stowaway_active = !pcconnect_active && stowaway_ns16550_claims(d->name);
-	int serial_bridge_active = !pcconnect_active && !stowaway_active &&
-	    serial_bridge_ns16550_claims(d->name);
+	const struct ns16550_backend *b = ns16550_backend(d);
+	int pcconnect_active = b && b->kind == NS16550_BACKEND_PCCONNECT;
+	int stowaway_active = b && b->kind == NS16550_BACKEND_STOWAWAY;
+	int serial_bridge_active = b && b->kind == NS16550_BACKEND_SERIAL_BRIDGE;
 	size_t rx_count;
 	int rx_data_pending;
 
@@ -452,12 +462,12 @@ DEVICE_ACCESS(ns16550)
 	 */
 	ns16550_update_tx_ready(d);
 
-	rx_count = ns16550_rx_count(d, pcconnect_active, stowaway_active,
-	    serial_bridge_active);
+	rx_count = ns16550_rx_count(d, b);
 	rx_data_pending = rx_count > 0;
 
 	if (pcconnect_active)
-		ns16550_update_modem_status(d, pcconnect_active, rx_data_pending);
+		ns16550_update_modem_status(d, b, pcconnect_active,
+		    rx_data_pending);
 	else if (stowaway_active) {
 		unsigned char delta = d->reg[com_msr] &
 		    (MSR_DDCD | MSR_TERI | MSR_DDSR | MSR_DCTS);
@@ -467,7 +477,7 @@ DEVICE_ACCESS(ns16550)
 		 * Stowaway drivers can be woken by a one-shot modem delta from
 		 * the keyboard backend.
 		 */
-		if (stowaway_uart_take_modem_delta())
+		if (b->take_modem_delta != NULL && b->take_modem_delta())
 			delta |= MSR_DCTS;
 		d->reg[com_msr] = delta | MSR_DCD | MSR_DSR | MSR_CTS;
 	} else
@@ -507,22 +517,15 @@ DEVICE_ACCESS(ns16550)
 		if (writeflag == MEM_WRITE) {
 			if (d->reg[com_mcr] & MCR_LOOPBACK)
 				console_makeavail(d->console_handle, idata);
-			else if (pcconnect_active)
-				pcconnect_uart_tx_byte(idata);
-			else if (stowaway_active)
-				stowaway_uart_tx_byte(idata);
-			else if (serial_bridge_active)
-				serial_bridge_uart_tx_byte(d->name, idata);
+			else if (b != NULL)
+				b->tx_byte(d->name, idata);
 			else
 				console_putchar(d->console_handle, idata);
 			if (pcconnect_active)
 				d->pcconnect_tx_irq_was_pending = 0;
 			d->tx_interrupt_pending = 1;
 		} else {
-			int x = pcconnect_active ? pcconnect_uart_rx_pop() :
-			    stowaway_active ? stowaway_uart_rx_pop() :
-			    serial_bridge_active ?
-			        serial_bridge_uart_rx_pop(d->name) :
+			int x = b != NULL ? b->rx_pop(d->name) :
 			    console_readchar(d->console_handle);
 			odata = x < 0? 0 : x;
 		}
@@ -544,8 +547,9 @@ DEVICE_ACCESS(ns16550)
 
 		/*  IER:  */
 		if (writeflag == MEM_WRITE) {
-			if (stowaway_active && (idata & IER_EMSC))
-				stowaway_uart_note_modem_wait();
+			if (stowaway_active && (idata & IER_EMSC) &&
+			    b->note_modem_wait != NULL)
+				b->note_modem_wait();
 			/*  This is to supress Linux' behaviour  */
 			if (idata != 0)
 				debug("[ ns16550 (%s): write to ier: 0x%02x ]"
@@ -576,14 +580,8 @@ DEVICE_ACCESS(ns16550)
 			 * outside this generic ns16550 model, so flush them here
 			 * when serial.dll resets the UART during COM open.
 			 */
-			if (idata & FIFO_RCV_RST) {
-				if (pcconnect_active)
-					pcconnect_uart_rx_clear();
-				else if (stowaway_active)
-					stowaway_uart_rx_clear();
-				else if (serial_bridge_active)
-					serial_bridge_uart_rx_clear(d->name);
-			}
+			if ((idata & FIFO_RCV_RST) && b != NULL)
+				b->rx_clear(d->name);
 			if (idata & FIFO_XMT_RST)
 				d->tx_interrupt_pending = 0;
 			if (pcconnect_active)
@@ -630,8 +628,9 @@ DEVICE_ACCESS(ns16550)
 
 	case com_lctl:
 		if (writeflag == MEM_WRITE) {
-			if (stowaway_active && (idata & 0x80))
-				stowaway_uart_note_port_config();
+			if (stowaway_active && (idata & 0x80) &&
+			    b->note_port_config != NULL)
+				b->note_port_config();
 			d->reg[com_lctl] = idata;
 			switch (idata & 0x7) {
 			case 0:	d->databits = 5; d->stopbits = "1"; break;
@@ -673,8 +672,8 @@ DEVICE_ACCESS(ns16550)
 			d->reg[com_mcr] = idata;
 			debug("[ ns16550 (%s): write to mcr: 0x%02x ]\n",
 			    d->name, (int)idata);
-			if (stowaway_active)
-				stowaway_uart_note_modem_control(
+			if (stowaway_active && b->note_modem_control != NULL)
+				b->note_modem_control(
 				    (idata & MCR_DTR) != 0,
 				    (idata & MCR_RTS) != 0);
 			if (!d->tx_interrupt_pending &&
@@ -703,16 +702,17 @@ DEVICE_ACCESS(ns16550)
 		}
 	}
 
-	if (pcconnect_active) {
-		pcconnect_note_uart_config(d->name, d->reg[com_lctl],
+	if (pcconnect_active && b->note_config != NULL) {
+		b->note_config(d->name, d->reg[com_lctl],
 		    d->reg[com_mcr], d->reg[com_ier], d->divisor, d->dlab);
 	}
 
 	if (writeflag == MEM_READ)
 		memory_writemax64(cpu, data, len, odata);
 
-	if (pcconnect_trace_enabled() && pcconnect_active) {
-		pcconnect_trace_uart_access(d->name, pcconnect_active,
+	if (pcconnect_active && b->trace_enabled != NULL &&
+	    b->trace_enabled() && b->trace_access != NULL) {
+		b->trace_access(d->name,
 		    writeflag == MEM_WRITE, (unsigned)relative_addr,
 		    (uint8_t)(writeflag == MEM_WRITE ? idata : odata),
 		    (uint32_t)cpu->pc,

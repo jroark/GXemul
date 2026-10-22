@@ -56,7 +56,6 @@
 #include "hw/cmu.h"
 #include "hw/pmu.h"
 
-#include "be300_probe.h"
 
 #include "cpu_mips.h"	/* mips_cpu_cold_reset() */
 
@@ -114,6 +113,13 @@ struct vr41xx_data {
 	uint8_t		sdramu_regs[0x10];
 };
 
+
+static dev_vr41xx_unhandled_hook_t dev_vr41xx_unhandled_hook;
+
+void dev_vr41xx_set_unhandled_hook(dev_vr41xx_unhandled_hook_t hook)
+{
+	dev_vr41xx_unhandled_hook = hook;
+}
 
 static uint64_t vr41xx_latch_read(const uint8_t *regs, uint32_t off,
 	unsigned len)
@@ -1097,11 +1103,10 @@ DEVICE_ACCESS(vr41xx)
 
 	default:
 	unhandled:
-		be300_probe_note_mmio("vr41xx-default",
-		    (uint32_t) relative_addr,
-		    writeflag == MEM_WRITE ? 'W' : 'R',
-		    (uint32_t) len, (uint64_t)(uint32_t) cpu->pc,
-		    BE300_MMIO_CLASS_DEFAULT);
+		if (dev_vr41xx_unhandled_hook != NULL)
+			dev_vr41xx_unhandled_hook((uint32_t) relative_addr,
+			    writeflag, (unsigned) len,
+			    (uint64_t)(uint32_t) cpu->pc);
 		if (writeflag == MEM_WRITE)
 			debug("[ vr41xx: unimplemented write to address "
 			    "0x%" PRIx64", data=0x%016" PRIx64" ]\n",

@@ -509,6 +509,10 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	struct memory *mem, int cpumodel);
 int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
 	int day, int hour, int minute, int second);
+/*  Called for each access to a register dev_vr41xx does not model.  */
+typedef void (*dev_vr41xx_unhandled_hook_t)(uint32_t offset, int writeflag,
+	unsigned len, uint64_t pc);
+void dev_vr41xx_set_unhandled_hook(dev_vr41xx_unhandled_hook_t hook);
 
 /*  lk201.c:  */
 struct lk201_data {
