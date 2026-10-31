@@ -121,6 +121,13 @@ void dev_vr41xx_set_unhandled_hook(dev_vr41xx_unhandled_hook_t hook)
 	dev_vr41xx_unhandled_hook = hook;
 }
 
+static dev_vr41xx_giu_pins_hook_t dev_vr41xx_giu_pins_hook;
+
+void dev_vr41xx_set_giu_pins_hook(dev_vr41xx_giu_pins_hook_t hook)
+{
+	dev_vr41xx_giu_pins_hook = hook;
+}
+
 static uint64_t vr41xx_latch_read(const uint8_t *regs, uint32_t off,
 	unsigned len)
 {
@@ -1098,6 +1105,11 @@ DEVICE_ACCESS(vr41xx)
 				odata = 0xAAE2;
 			else
 				odata = 0;
+			/*  The board's live inputs (BE-300: GPIO12 AC
+			    adapter, GPIO2 charger).  */
+			if (dev_vr41xx_giu_pins_hook != NULL)
+				odata = dev_vr41xx_giu_pins_hook(
+				    (uint16_t)odata);
 		}
 		break;
 

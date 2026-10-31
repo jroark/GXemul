@@ -2523,6 +2523,25 @@ X(wait)
 
 
 /*
+ *  standby_vr41xx: VR41xx STANDBY (COP0 func 0x21).
+ *
+ *  Unlike WAIT, it sets Status.IE as it executes (VR4131 UM, the STANDBY
+ *  instruction description; Linux's vr41xx_cpu_wait in
+ *  arch/mips/vr41xx/common/pmu.c issues STANDBY with interrupts disabled
+ *  and relies on it), so a kernel that checks for work with interrupts off
+ *  is still woken by the next one.
+ */
+X(standby_vr41xx)
+{
+	if (!cop0_availability_check(cpu, ic))
+		return;
+
+	cpu->cd.mips.coproc[0]->reg[COP0_STATUS] |= STATUS_IE;
+	instr(idle)(cpu, ic);
+}
+
+
+/*
  *  hibernate_vr41xx: VR4131-family HIBERNATE (COP0 func 0x23).
  *
  *  Per VR4131 UM rev 2.00 §6.1.3 (Software shutdown), HIBERNATE puts
@@ -4430,8 +4449,8 @@ X(to_be_translated)
 				}
 				break;
 			case COP0_STANDBY:
-				/*  NOTE: Reusing the 'wait' instruction:  */
-				ic->f = instr(wait);
+				/*  'wait', and Status.IE set:  */
+				ic->f = instr(standby_vr41xx);
 				if (cpu->cd.mips.cpu_type.rev != MIPS_R4100) {
 					static int warned = 0;
 					ic->f = instr(reserved);
