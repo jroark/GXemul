@@ -111,8 +111,15 @@ struct vr41xx_data {
 	uint8_t		dmaau_regs[0x20];
 	uint8_t		dcu_regs[0x20];
 	uint8_t		sdramu_regs[0x10];
+
+	/*  HIBERNATE (VR4131 UM §12.1.4(4)) and the POWER pin:  */
+	int		hibernating;
+	int		power_pin;		/*  POWER, high while pressed  */
+	int		power_edge;		/*  a rising edge while hibernating  */
 };
 
+
+static void vr41xx_reset_units(struct vr41xx_data *d);
 
 static dev_vr41xx_unhandled_hook_t dev_vr41xx_unhandled_hook;
 
@@ -914,6 +921,7 @@ DEVICE_ACCESS(vr41xx)
 					d->pmu.softrst_pending = 0;
 					pmu_apply_pending_reset_state(&d->pmu,
 					    cpu->ninstrs);
+					vr41xx_reset_units(d);
 					if (d->pmu.cold_reset != NULL)
 						d->pmu.cold_reset(d->pmu.cpu_opaque);
 				}
@@ -1157,8 +1165,123 @@ ret:
  */
 static void vr41xx_issue_cold_reset_thunk(void *opaque)
 {
+	if (g_vr41xx_for_edge_cb != NULL)
+		vr41xx_reset_units(g_vr41xx_for_edge_cb);
 	mips_cpu_cold_reset((struct cpu *)opaque);
 }
+
+
+/*
+ *  vr41xx_reset_units():
+ *
+ *  The peripheral reset that comes with every reset but a power-on's own
+ *  (RSTSW, SOFTRST, HALTimer, and the wake from HIBERNATE): "the PMU
+ *  resets all peripheral units except for the RTC and PMU" (VR4131 UM
+ *  §12.1.1(2), Table 12-1; §12.1.2(1), Table 12-2 "Software shutdown").
+ *  Of the units modelled here the ICU, CMU, DMAAU and DCU go back to their
+ *  reset values. The BCU, SDRAMU and GIU keep theirs: after Hibernate
+ *  "the peripheral registers are also undefined except PMU, LED, and a
+ *  part of RTC, BCU, and GIU" (§12.1.4(4)), and the boot ROM programs the
+ *  BCU and SDRAM timing again anyway.
+ */
+static void vr41xx_reset_units(struct vr41xx_data *d)
+{
+	d->sysint1 = d->msysint1 = 0;
+	d->sysint2 = d->msysint2 = 0;
+	d->giuint = d->giumask = 0;
+	d->pending_timer_interrupts = 0;
+	INTERRUPT_DEASSERT(d->cpu_irq);
+	cmu_init(&d->cmu);
+	memset(d->dmaau_regs, 0, sizeof(d->dmaau_regs));
+	memset(d->dcu_regs, 0, sizeof(d->dcu_regs));
+}
+
+
+/*
+ *  dev_vr41xx_power_switch():
+ *
+ *  The board's POWER pin, high while the button is held. A rising edge
+ *  while hibernating is a wake (UM §12.1.3(1)); while running, the power
+ *  switch interrupt (POWERSWINTR) is not modelled yet.
+ */
+void dev_vr41xx_power_switch(int pressed)
+{
+	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
+
+	if (d == NULL)
+		return;
+	if (pressed && !d->power_pin && d->hibernating)
+		d->power_edge = 1;
+	d->power_pin = pressed != 0;
+}
+
+
+/*
+ *  dev_vr41xx_reset_switch():
+ *
+ *  A pulse on RSTSW#, the reset switch (or a board part that drives it):
+ *  the peripheral units but the RTC and PMU are reset, the CPU cold-resets
+ *  and PMUINTREG.RSTSW is set (UM §12.1.1(2)).
+ */
+void dev_vr41xx_reset_switch(struct cpu *cpu)
+{
+	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
+
+	if (d == NULL || d->cpumodel != 4131)
+		return;
+	d->hibernating = 0;
+	pmu_reset_switch(&d->pmu);
+	pmu_apply_pending_reset_state(&d->pmu, cpu->ninstrs);
+	vr41xx_reset_units(d);
+	mips_cpu_cold_reset(cpu);
+}
+
+
+/*
+ *  dev_vr41xx_hibernate():
+ *
+ *  One step of the HIBERNATE instruction, which runs until the CPU wakes:
+ *
+ *    - Entering, the PMU "checks for currently pending interrupts. If there
+ *      are no pending interrupts, it stops the CPU clock" (UM §12.1.2(2)):
+ *      with an unmasked ICU request pending it does nothing.
+ *    - Asleep, only the RTC runs. A rising edge on POWER wakes it, setting
+ *      no PMUINTREG bit (§12.1.3(1)), as does the Elapsed Time alarm, which
+ *      sets RTCINTR and is ignored while POWER is held (§12.1.3(4)). DCD#
+ *      and the GPIO activation inputs (§12.1.3(2), (3)) are not modelled.
+ *    - Waking resets the peripheral units, arms the HALTimer, and the CPU
+ *      cold-resets with SDRAM kept, as "returning from Hibernate mode" does
+ *      (§12.1.4(4)). The caller does the CPU part.
+ */
+int dev_vr41xx_hibernate(struct cpu *cpu)
+{
+	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
+	uint32_t cause;
+
+	if (d == NULL || d->cpumodel != 4131)
+		return VR41XX_HIBERNATE_WOKE;
+	if (!d->hibernating) {
+		if ((d->sysint1 & d->msysint1) | (d->sysint2 & d->msysint2))
+			return VR41XX_HIBERNATE_NOT_TAKEN;
+		d->hibernating = 1;
+		d->power_edge = 0;
+		fprintf(stderr, "[PMU] HIBERNATE at pc=%08x\n", (uint32_t)cpu->pc);
+	}
+	if (d->power_edge)
+		cause = 0;
+	else if (!d->power_pin && (d->rtc.rtcint & RTCINT_ELAPSEDTIME_INT))
+		cause = PMUINTREG_RTCINTR;
+	else
+		return VR41XX_HIBERNATE_ASLEEP;
+	d->hibernating = 0;
+	d->power_edge = 0;
+	fprintf(stderr, "[PMU] woken from HIBERNATE by the %s\n",
+	    cause ? "Elapsed Time alarm" : "power switch");
+	vr41xx_reset_units(d);
+	pmu_hibernate_wake(&d->pmu, cause, cpu->ninstrs);
+	return VR41XX_HIBERNATE_WOKE;
+}
+
 
 
 /*

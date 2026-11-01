@@ -2544,27 +2544,42 @@ X(standby_vr41xx)
 /*
  *  hibernate_vr41xx: VR4131-family HIBERNATE (COP0 func 0x23).
  *
- *  Per VR4131 UM rev 2.00 §6.1.3 (Software shutdown), HIBERNATE puts
- *  DRAM into self-refresh mode, deasserts MPOWER, and enters reset
- *  status. Recovery occurs when POWER/WakeUp/DCD/GPIO is asserted, at
- *  which point the CPU begins the cold reset exception sequence at the
- *  ROM reset vector (0xBFC00000). A software-shutdown reset initialises
- *  the entire internal state except RTC timer and PMU.
- *
- *  Emulation: collapse the power-down / wakeup-wait to zero wall time
- *  and jump directly to the cold-reset path. mips_cpu_cold_reset()
- *  reinitialises CP0 and sets PC to 0xBFC00000 while preserving SDRAM
- *  and peripherals. This is the software analogue of the Pass 31 KjCMU
- *  warm-reset at src/be300_devices.c:119 (triggered there by VRC4173
- *  GPIO writes instead of the HIBERNATE instruction).
+ *  VR4131 UM rev 2.00 §12.1.4(4): the SDRAM self-refreshes, MPOWER goes
+ *  inactive and the CPU enters reset status, with only the RTC running,
+ *  until the power switch, the Elapsed Time alarm, DCD# or a GPIO
+ *  activation input starts it again through a cold reset; the PMU
+ *  doesn't stop the clock at all while an interrupt is pending
+ *  (§12.1.2(2)). dev_vr41xx_hibernate() decides each step. Asleep, the
+ *  instruction runs again each batch, idling as WAIT does so that time,
+ *  and with it the RTC and the board's scripts, goes on; ERL is set, as
+ *  reset status masks interrupts. Woken, mips_cpu_cold_reset() restarts
+ *  at the ROM reset vector with SDRAM kept.
  */
 X(hibernate_vr41xx)
 {
+	int low_pc;
+
 	if (!cop0_availability_check(cpu, ic))
 		return;
 
+	switch (dev_vr41xx_hibernate(cpu)) {
+	case VR41XX_HIBERNATE_NOT_TAKEN:
+		return;
+	case VR41XX_HIBERNATE_ASLEEP:
+		cpu->cd.mips.coproc[0]->reg[COP0_STATUS] |= STATUS_ERL;
+		low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+		    / sizeof(struct mips_instr_call);
+		cpu->pc &= ~((MIPS_IC_ENTRIES_PER_PAGE-1)
+		    << MIPS_INSTR_ALIGNMENT_SHIFT);
+		cpu->pc += (low_pc << MIPS_INSTR_ALIGNMENT_SHIFT);
+		cpu->wants_to_idle = true;
+		cpu->n_translated_instrs += N_DYNTRANS_IDLE_BREAK;
+		cpu->cd.mips.next_ic = &nothing_call;
+		return;
+	}
+
 	/*  Sync PC to the hibernate instruction before the reset.  */
-	int low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
+	low_pc = ((size_t)ic - (size_t)cpu->cd.mips.cur_ic_page)
 	    / sizeof(struct mips_instr_call);
 	cpu->pc &= ~((MIPS_IC_ENTRIES_PER_PAGE-1)
 	    << MIPS_INSTR_ALIGNMENT_SHIFT);

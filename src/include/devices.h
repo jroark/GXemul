@@ -517,6 +517,15 @@ void dev_vr41xx_set_unhandled_hook(dev_vr41xx_unhandled_hook_t hook);
     read, returns the pins to report (battery/AC lines on the BE-300).  */
 typedef uint16_t (*dev_vr41xx_giu_pins_hook_t)(uint16_t pins);
 void dev_vr41xx_set_giu_pins_hook(dev_vr41xx_giu_pins_hook_t hook);
+/*  Board signals into the VR4131 PMU: the POWER pin (held = 1) and a
+    RSTSW# pulse.  */
+void dev_vr41xx_power_switch(int pressed);
+void dev_vr41xx_reset_switch(struct cpu *cpu);
+/*  One step of HIBERNATE (VR4131 UM §12.1.4(4)), for cpu_mips_instr.c.  */
+#define	VR41XX_HIBERNATE_NOT_TAKEN	0	/*  an interrupt is pending  */
+#define	VR41XX_HIBERNATE_ASLEEP		1	/*  run it again  */
+#define	VR41XX_HIBERNATE_WOKE		2	/*  cold-reset now  */
+int dev_vr41xx_hibernate(struct cpu *cpu);
 
 /*  lk201.c:  */
 struct lk201_data {
