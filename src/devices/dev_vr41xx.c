@@ -197,6 +197,20 @@ void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
  */
 static struct vr41xx_data *g_vr41xx_for_edge_cb = NULL;
 
+/*
+ *  The GIU pins 15..0 the guest drives: *direction gets GIUIOSELL (1 =
+ *  output), the return value the output latch. Boards use it for the lines
+ *  that switch their peripherals' power.
+ */
+uint16_t dev_vr41xx_giu_outputs(uint16_t *direction)
+{
+	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
+
+	if (direction != NULL)
+		*direction = d != NULL ? d->giu_regs[0] : 0;
+	return d != NULL ? d->giu_regs[2] : 0;
+}
+
 int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
 	int day, int hour, int minute, int second)
 {
@@ -1097,7 +1111,9 @@ DEVICE_ACCESS(vr41xx)
 		break;
 	case 0x144:	/*  GIUPIODL - Pin I/O data low  */
 		if (writeflag == MEM_WRITE) {
-			/*  Just latch output bits  */
+			/*  The output latch. It drives the pins GIUIOSELL
+			    makes outputs (VR4131 UM, GIUPIODL).  */
+			d->giu_regs[2] = (uint16_t)idata;
 		} else {
 			/*
 			 *  Return board strap / GPIO input state.
@@ -1118,6 +1134,9 @@ DEVICE_ACCESS(vr41xx)
 			if (dev_vr41xx_giu_pins_hook != NULL)
 				odata = dev_vr41xx_giu_pins_hook(
 				    (uint16_t)odata);
+			/*  An output pin reads back what was latched.  */
+			odata = (odata & ~(uint64_t)d->giu_regs[0]) |
+			    (d->giu_regs[2] & d->giu_regs[0]);
 		}
 		break;
 

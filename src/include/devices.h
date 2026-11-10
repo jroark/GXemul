@@ -517,6 +517,7 @@ void dev_vr41xx_set_unhandled_hook(dev_vr41xx_unhandled_hook_t hook);
     read, returns the pins to report (battery/AC lines on the BE-300).  */
 typedef uint16_t (*dev_vr41xx_giu_pins_hook_t)(uint16_t pins);
 void dev_vr41xx_set_giu_pins_hook(dev_vr41xx_giu_pins_hook_t hook);
+uint16_t dev_vr41xx_giu_outputs(uint16_t *direction);
 /*  Board signals into the VR4131 PMU: the POWER pin (held = 1) and a
     RSTSW# pulse.  */
 void dev_vr41xx_power_switch(int pressed);
