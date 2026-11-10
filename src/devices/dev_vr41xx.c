@@ -861,11 +861,8 @@ DEVICE_ACCESS(vr41xx)
 	case 0x80:	/*  Level 1 system interrupt reg 1...  */
 		if (writeflag == MEM_READ)
 			odata = d->sysint1;
-		else {
-			/*  TODO: clear-on-write-one?  */
-			d->sysint1 &= ~idata;
-			d->sysint1 &= 0xffff;
-		}
+		/*  Read-only: it shows the sources' levels, which are
+		    cleared at the sources (VR4131 UM 11.2.1).  */
 		break;
 	case 0x88:
 		if (writeflag == MEM_READ)
@@ -898,11 +895,7 @@ DEVICE_ACCESS(vr41xx)
 	case 0xa0:	/*  Level 1 system interrupt reg 2...  */
 		if (writeflag == MEM_READ)
 			odata = d->sysint2;
-		else {
-			/*  TODO: clear-on-write-one?  */
-			d->sysint2 &= ~idata;
-			d->sysint2 &= 0xffff;
-		}
+		/*  Read-only, like SYSINT1REG (VR4131 UM 11.2.6).  */
 		break;
 	case 0xa6:
 		if (writeflag == MEM_READ)
