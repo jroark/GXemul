@@ -260,6 +260,19 @@ static void vr41xx_on_interrupt_delivered(void *extra,
 
 
 /*
+ *  The GIU lines that request an interrupt. On the VR4131 a pin only
+ *  requests one while its GIUINTEN bit is set (VR4131 UM, GIUINTENL/H:
+ *  "interrupt request detection enable"); older models have no such
+ *  register here.
+ */
+static uint32_t vr41xx_giu_pending(struct vr41xx_data *d)
+{
+	if (d->cpumodel == 4131)
+		return d->giuint & d->giu_regs[6];
+	return d->giuint;
+}
+
+/*
  *  vr41xx_giu_interrupt_assert():
  *  vr41xx_giu_interrupt_deassert():
  */
@@ -268,11 +281,12 @@ void vr41xx_giu_interrupt_assert(struct interrupt *interrupt)
 	struct vr41xx_data *d = (struct vr41xx_data *) interrupt->extra;
 	int line = interrupt->line;
 	d->giuint |= (1 << line);
-	if (line < 16)
-		d->giu_regs[4] |= (1 << line);
-	else
+	if (line < 16) {
+		if (d->cpumodel != 4131 || (d->giu_regs[6] & (1 << line)))
+			d->giu_regs[4] |= (1 << line);
+	} else
 		d->giu_regs[5] |= (1 << (line - 16));
-	if (d->giuint & d->giumask)
+	if (vr41xx_giu_pending(d) & d->giumask)
                 INTERRUPT_ASSERT(d->giu_irq);
 }
 void vr41xx_giu_interrupt_deassert(struct interrupt *interrupt)
@@ -280,7 +294,7 @@ void vr41xx_giu_interrupt_deassert(struct interrupt *interrupt)
 	struct vr41xx_data *d = (struct vr41xx_data *) interrupt->extra;
 	int line = interrupt->line;
 	d->giuint &= ~(1 << line);
-	if (!(d->giuint & d->giumask))
+	if (!(vr41xx_giu_pending(d) & d->giumask))
                 INTERRUPT_DEASSERT(d->giu_irq);
 }
 
@@ -866,7 +880,7 @@ DEVICE_ACCESS(vr41xx)
 		break;
 	case 0x88:
 		if (writeflag == MEM_READ)
-			odata = d->giuint;
+			odata = vr41xx_giu_pending(d);
 		else
 			d->giuint &= ~idata;
 		break;
@@ -1073,9 +1087,15 @@ DEVICE_ACCESS(vr41xx)
 		{
 			int idx = ((int)relative_addr - 0x140) / 2;
 			if (idx >= 0 && idx < 16) {
-				if (writeflag == MEM_WRITE)
+				if (writeflag == MEM_WRITE) {
 					d->giu_regs[idx] = (uint16_t)idata;
-				else
+					/*  Enabling a pin that is already
+					    at its active level latches the
+					    request.  */
+					if (relative_addr == 0x14c)
+						d->giu_regs[4] |= d->giuint &
+						    (uint16_t)idata;
+				} else
 					odata = d->giu_regs[idx];
 			}
 		}
@@ -1094,7 +1114,8 @@ DEVICE_ACCESS(vr41xx)
 					d->giu_regs[idx] &= ~(uint16_t)idata;
 					if (relative_addr == 0x148) {
 						d->giuint &= ~(uint16_t)idata;
-						if ((d->giuint & d->giumask) == 0)
+						if ((vr41xx_giu_pending(d) &
+						    d->giumask) == 0)
 							INTERRUPT_DEASSERT(d->giu_irq);
 					}
 				} else
@@ -1152,7 +1173,7 @@ ret:
 	/*
 	 *  Recalculate interrupt assertions:
 	 */
-	if (d->giuint & d->giumask)
+	if (vr41xx_giu_pending(d) & d->giumask)
                 INTERRUPT_ASSERT(d->giu_irq);
 	else
                 INTERRUPT_DEASSERT(d->giu_irq);
