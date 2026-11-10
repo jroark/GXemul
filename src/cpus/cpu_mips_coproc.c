@@ -869,8 +869,25 @@ void coproc_register_write(struct cpu *cpu,
 			/*  fatal("COP0_CONFIG: modifying K0 bits: "
 			    "0x%08x => ", cp->reg[reg_nr]);  */
 			tmp = *ptr;
-			tmp &= 0x3;	/*  only bits 2..0 can be written  */
-			cp->reg[reg_nr] &= ~(0x3);  cp->reg[reg_nr] |= tmp;
+			{
+				/*  K0 (bits 2..0) can be written.  */
+				uint64_t wmask = 0x7;
+
+				/*
+				 *  VR4131: BP (bit 16) and bit 22 are writable
+				 *  too. A real BE-300 reads 0x10135923 after
+				 *  its boot ROM writes 0x00035B23 (BP and K0
+				 *  taken, IC/M16/EC not), and bit 22 with BP
+				 *  is NEC's CACHE-instruction workaround for
+				 *  PRId 0x0C80..0x0C82, which Linux
+				 *  (arch/mips/mm/c-r4k.c) sets and reads back.
+				 */
+				if (cpu->cd.mips.cpu_type.rev == MIPS_R4100)
+					wmask |= (1 << 16) | (1 << 22);
+				tmp &= wmask;
+				cp->reg[reg_nr] &= ~wmask;
+				cp->reg[reg_nr] |= tmp;
+			}
 			/*  fatal("0x%08x\n", cp->reg[reg_nr]);  */
 			return;
 		case COP0_STATUS:
