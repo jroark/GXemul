@@ -4124,6 +4124,12 @@ X(to_be_translated)
 			case SPECIAL_MOVZ:  ic->f = instr(movz); break;
 			}
 
+			/*  MOVN and MOVZ are MIPS IV: Reserved Instruction
+			    on a MIPS I..III core such as the VR4131.  */
+			if ((s6 == SPECIAL_MOVN || s6 == SPECIAL_MOVZ) &&
+			    cpu->cd.mips.cpu_type.isa_level < 4)
+				ic->f = instr(reserved);
+
 			ic->arg[0] = (size_t)&cpu->cd.mips.gpr[rs];
 			ic->arg[1] = (size_t)&cpu->cd.mips.gpr[rt];
 			ic->arg[2] = (size_t)&cpu->cd.mips.gpr[rd];
@@ -4935,7 +4941,8 @@ X(to_be_translated)
 			ic->arg[0] = (size_t)&cpu->cd.mips.gpr[rs];
 			ic->arg[2] = (int64_t)(int16_t)imm;
 
-			if (cpu->cd.mips.cpu_type.isa_level < 32) {
+			/*  The trap-immediate instructions are MIPS II.  */
+			if (cpu->cd.mips.cpu_type.isa_level < 2) {
 				static int warning = 0;
 				if (!warning && !cpu->translation_readahead) {
 					fatal("[ WARNING! Trap opcode used, but"
@@ -5011,6 +5018,13 @@ X(to_be_translated)
 		/*  32-bit load-linked/store-condition for ISA II and up:  */
 		/*  (64-bit load-linked/store-condition for ISA III...)  */
 		if (cpu->cd.mips.cpu_type.isa_level < 2) {
+			ic->f = instr(reserved);
+			break;
+		}
+
+		/*  The VR4100 core has no LL/SC ("does not support LL,
+		    LLD, SC, SCD", VR4131 UM): Reserved Instruction.  */
+		if (cpu->cd.mips.cpu_type.rev == MIPS_R4100) {
 			ic->f = instr(reserved);
 			break;
 		}

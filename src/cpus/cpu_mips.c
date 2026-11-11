@@ -2131,29 +2131,6 @@ void mips_cpu_exception(struct cpu *cpu, int exccode, int tlb, uint64_t vaddr,
 		reg[COP0_STATUS] |= STATUS_EXL;
 	}
 
-	/*
-	 *  Edge-triggered IP delivery: for any IP bit that a device has
-	 *  marked as edge-triggered in ip_edge_triggered_mask, clear the
-	 *  bit in CAUSE now that the CPU has taken the exception. Devices
-	 *  that want level-triggered behavior (e.g. CP0 Compare / IP7)
-	 *  simply don't set their bit in the mask and re-assert each batch.
-	 */
-	if (exccode == EXCEPTION_INT &&
-	    cpu->cd.mips.ip_edge_triggered_mask != 0) {
-		/*  Only an edge the CPU could have taken (its Status.IM
-		    bit set, same bit position as Cause.IP) is delivered by
-		    this exception; a masked edge stays pending.  */
-		uint32_t deliverable = cpu->cd.mips.ip_edge_triggered_mask &
-		    (uint32_t)reg[COP0_STATUS] & STATUS_IM_MASK;
-		uint32_t cleared_ip_mask = (uint32_t)(reg[COP0_CAUSE] &
-		    deliverable);
-		reg[COP0_CAUSE] &= ~(uint64_t)deliverable;
-		if (cpu->cd.mips.ip_edge_delivered != NULL)
-			cpu->cd.mips.ip_edge_delivered(
-			    cpu->cd.mips.ip_edge_delivered_extra,
-			    cleared_ip_mask);
-	}
-
 	/*  Sign-extend:  */
 	reg[COP0_CAUSE] = (int64_t)(int32_t)reg[COP0_CAUSE];
 	reg[COP0_STATUS] = (int64_t)(int32_t)reg[COP0_STATUS];

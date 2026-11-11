@@ -67,6 +67,10 @@
 #define	DEV_VR41XX_LENGTH		0x800	/*  up to (not including) SIU at 0x800  */
 struct vr41xx_data {
 	struct interrupt cpu_irq;		/*  Connected to MIPS irq 2  */
+	struct interrupt int1_irq;		/*  RTCLong1: MIPS irq 3  */
+	uint64_t	access_batch_start;	/*  see vr41xx_cycles_now()  */
+	uint64_t	access_cycles;
+	int		has_int1;
 	int		cpumodel;		/*  Model nr, e.g. 4121  */
 	struct machine *machine;
 
@@ -116,6 +120,7 @@ struct vr41xx_data {
 	int		hibernating;
 	int		power_pin;		/*  POWER, high while pressed  */
 	int		power_edge;		/*  a rising edge while hibernating  */
+	int		power_press;		/*  a rising edge while running  */
 };
 
 
@@ -165,6 +170,65 @@ static void vr41xx_seed_latch32(uint8_t *regs, uint32_t off, uint32_t value)
 }
 
 /*
+ *  vr41xx_update_cpu_lines():
+ *
+ *  The ICU's requests to the CPU. On the VR4122/VR4131 RTCLong1 does not
+ *  go to Int0 with the other sources: it has its own input, Int1 (CPU IP3),
+ *  and RTCLong2 has Int2. Linux's vr41xx ICU driver has the same fixed
+ *  assignment (sysint1_assign[2] = 1, sysint2_assign[0] = 2; only the VR4133
+ *  can change it), and a real BE-300 under Windows CE shows it: SYSINT1REG
+ *  and MSYSINT1REG both have bit 2 set (0x0004, 0x0307) while Cause is
+ *  0x00000810, IP3 pending and IP2 clear, with Status 0x00008401 leaving IP3
+ *  masked (be300 docs/hardware/hw_dump_vr4131.txt, cpu_state.txt). Windows CE
+ *  never serves RTCLong1; its IP2 dispatcher drops bit 2 (NK 0x800A7B70) and
+ *  its tick is CP0 Compare.
+ *
+ *  A request stays up until its source is cleared; for RTCLong1 that is a
+ *  write of 1 to RTCINTREG bit 1 (VR4131 UM 13.2.9).
+ */
+#define	VR41XX_SYSINT1_POWER	(1 << 1)
+#define	VR41XX_SYSINT1_RTCL1	(1 << 2)
+#define	VR41XX_SYSINT2_RTCL2	(1 << 0)
+
+static void vr41xx_update_cpu_lines(struct vr41xx_data *d)
+{
+	uint32_t p1 = d->sysint1 & d->msysint1;
+	uint32_t p2 = d->sysint2 & d->msysint2;
+
+	if (d->has_int1) {
+		if (p1 & VR41XX_SYSINT1_RTCL1)
+			INTERRUPT_ASSERT(d->int1_irq);
+		else
+			INTERRUPT_DEASSERT(d->int1_irq);
+		p1 &= ~VR41XX_SYSINT1_RTCL1;
+		p2 &= ~VR41XX_SYSINT2_RTCL2;
+	}
+	if (p1 | p2)
+		INTERRUPT_ASSERT(d->cpu_irq);
+	else
+		INTERRUPT_DEASSERT(d->cpu_irq);
+}
+
+/*
+ *  SYSINT1REG.POWERINTR is the PMU's power switch request and follows
+ *  PMUINTREG.POWERSWINTR, which software clears by writing 1 to it. Windows
+ *  CE keeps it unmasked (MSYSINT1REG 0x0307 in docs/hardware/
+ *  hw_dump_vr4131.txt) and gives it the same handler as the companion's
+ *  button source (NK 0x800A9014-0x800A9028).
+ */
+static void vr41xx_update_power_intr(struct vr41xx_data *d)
+{
+	if (d->cpumodel != 4131)
+		return;
+	if (pmu_read(&d->pmu, PMU_PMUINTREG, 2) & PMUINTREG_POWERSWINTR)
+		d->sysint1 |= VR41XX_SYSINT1_POWER;
+	else
+		d->sysint1 &= ~VR41XX_SYSINT1_POWER;
+	vr41xx_update_cpu_lines(d);
+}
+
+
+/*
  *  vr41xx_vrip_interrupt_assert():
  *  vr41xx_vrip_interrupt_deassert():
  */
@@ -176,8 +240,7 @@ void vr41xx_vrip_interrupt_assert(struct interrupt *interrupt)
 		d->sysint1 |= (1 << line);
 	else
 		d->sysint2 |= (1 << (line-16));
-	if ((d->sysint1 & d->msysint1) | (d->sysint2 & d->msysint2))
-                INTERRUPT_ASSERT(d->cpu_irq);
+	vr41xx_update_cpu_lines(d);
 }
 void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
 {
@@ -187,8 +250,7 @@ void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
 		d->sysint1 &= ~(1 << line);
 	else
 		d->sysint2 &= ~(1 << (line-16));
-	if (!(d->sysint1 & d->msysint1) && !(d->sysint2 & d->msysint2))
-                INTERRUPT_DEASSERT(d->cpu_irq);
+	vr41xx_update_cpu_lines(d);
 }
 
 /*
@@ -196,6 +258,20 @@ void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
  *  edge-triggered interrupt callback. BE-300 has exactly one VR41xx.
  */
 static struct vr41xx_data *g_vr41xx_for_edge_cb = NULL;
+
+/*
+ *  The GIU pins 15..0 the guest drives: *direction gets GIUIOSELL (1 =
+ *  output), the return value the output latch. Boards use it for the lines
+ *  that switch their peripherals' power.
+ */
+uint16_t dev_vr41xx_giu_outputs(uint16_t *direction)
+{
+	struct vr41xx_data *d = g_vr41xx_for_edge_cb;
+
+	if (direction != NULL)
+		*direction = d != NULL ? d->giu_regs[0] : 0;
+	return d != NULL ? d->giu_regs[2] : 0;
+}
 
 int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
 	int day, int hour, int minute, int second)
@@ -210,40 +286,17 @@ int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
 }
 
 /*
- *  vr41xx_on_interrupt_delivered():
- *
- *  The CPU's ip_edge_delivered hook: called by mips_cpu_exception() when
- *  the CPU takes an EXCEPTION_INT
- *  whose CAUSE.IP bits include any of ip_edge_triggered_mask. This lets
- *  the VRIP aggregator resync its internal latches now that the CPU has
- *  delivered the edge.
- *
- *  IP2 is the shared VRIP CPU line for SYSINT1/SYSINT2 sources. RTCL1 is
- *  edge-triggered and consumed on delivery (VR4131 UM sections 11.2.1
- *  and 13.2.9). Other enabled level sources such as GIU/touch must keep
- *  IP2 asserted after the CPU-side edge latch is cleared.
+ *  The GIU lines that request an interrupt. On the VR4131 a pin only
+ *  requests one while its GIUINTEN bit is set (VR4131 UM, GIUINTENL/H:
+ *  "interrupt request detection enable"); older models have no such
+ *  register here.
  */
-static void vr41xx_on_interrupt_delivered(void *extra,
-	uint32_t cleared_ip_mask)
+static uint32_t vr41xx_giu_pending(struct vr41xx_data *d)
 {
-	struct vr41xx_data *d = (struct vr41xx_data *) extra;
-
-	/*  CAUSE bit 10 == IP2 (STATUS_IM_SHIFT + 2). If that's in the
-	    cleared mask, consume the RTCL1 edge.  */
-	if ((cleared_ip_mask & (1u << 10)) != 0 && d->rtcl1_irq_asserted) {
-		d->sysint1 &= ~(1u << 2);
-		d->rtc.rtcint &= ~RTCINT_RTCLONG1_INT;
-		d->rtcl1_irq_asserted = 0;
-	}
-	if ((cleared_ip_mask & (1u << 10)) != 0) {
-		if ((d->sysint1 & d->msysint1) ||
-		    (d->sysint2 & d->msysint2))
-			INTERRUPT_ASSERT(d->cpu_irq);
-		else
-			INTERRUPT_DEASSERT(d->cpu_irq);
-	}
+	if (d->cpumodel == 4131)
+		return d->giuint & d->giu_regs[6];
+	return d->giuint;
 }
-
 
 /*
  *  vr41xx_giu_interrupt_assert():
@@ -254,11 +307,12 @@ void vr41xx_giu_interrupt_assert(struct interrupt *interrupt)
 	struct vr41xx_data *d = (struct vr41xx_data *) interrupt->extra;
 	int line = interrupt->line;
 	d->giuint |= (1 << line);
-	if (line < 16)
-		d->giu_regs[4] |= (1 << line);
-	else
+	if (line < 16) {
+		if (d->cpumodel != 4131 || (d->giu_regs[6] & (1 << line)))
+			d->giu_regs[4] |= (1 << line);
+	} else
 		d->giu_regs[5] |= (1 << (line - 16));
-	if (d->giuint & d->giumask)
+	if (vr41xx_giu_pending(d) & d->giumask)
                 INTERRUPT_ASSERT(d->giu_irq);
 }
 void vr41xx_giu_interrupt_deassert(struct interrupt *interrupt)
@@ -266,7 +320,7 @@ void vr41xx_giu_interrupt_deassert(struct interrupt *interrupt)
 	struct vr41xx_data *d = (struct vr41xx_data *) interrupt->extra;
 	int line = interrupt->line;
 	d->giuint &= ~(1 << line);
-	if (!(d->giuint & d->giumask))
+	if (!(vr41xx_giu_pending(d) & d->giumask))
                 INTERRUPT_DEASSERT(d->giu_irq);
 }
 
@@ -542,9 +596,17 @@ static void timer_tick(struct timer *timer, void *extra)
 }
 
 
-DEVICE_TICK(vr41xx)
+/*
+ *  vr41xx_advance_time():
+ *
+ *  Bring the RTC, RTCL1 and the PMU HALTimer up to cycle `now`. Called at
+ *  the end of every dyntrans batch (DEVICE_TICK) and, with the cycles run
+ *  so far in the current batch, when the guest reads the Elapsed Time
+ *  counter (vr41xx_cycles_now).
+ */
+static void vr41xx_advance_time(struct cpu *cpu, struct vr41xx_data *d,
+	uint64_t now)
 {
-	struct vr41xx_data *d = (struct vr41xx_data *) extra;
 	uint64_t emulated_hz;
 	uint64_t tick_cycles;
 
@@ -561,13 +623,20 @@ DEVICE_TICK(vr41xx)
 	 * write it and it runs at a different rate.
 	 */
 	{
-		uint64_t now = cpu->ninstrs;
-
+		/*  A read inside a batch may already have advanced to a
+		    cycle past the batch's start.  */
+		if (now < d->last_cycle_sample)
+			now = d->last_cycle_sample;
 		tick_cycles = now - d->last_cycle_sample;
 		d->last_cycle_sample = now;
 
 		/*  Pet / fire the PMU HALTimer watchdog (UM §12.2.2).  */
 		pmu_tick(&d->pmu, now);
+		if (d->power_press) {
+			d->power_press = 0;
+			pmu_power_switch(&d->pmu);
+			vr41xx_update_power_intr(d);
+		}
 	}
 
 	if (d->etime_period_cycles == 0) {
@@ -611,23 +680,9 @@ DEVICE_TICK(vr41xx)
 	}
 
 	/*
-	 * RTCL1 delivery model (per VR4131 UM §11.2.1 SYSINT1 read-only,
-	 * §13.2.9 RTCINTREG.RTCINTR1 sticky W1C).
-	 *
-	 * RTCL1 is a brief edge pulse on real hardware. WinCE NK's OAL IP2
-	 * dispatcher does NOT write RTCINTREG to ack (only 2 RTCINTREG
-	 * writes observed across 15 s of boot, both at init), and NK's ISR
-	 * mask manipulation (MSYSINT1=0 then back to 0x0105) has RTCL1 bit 2
-	 * enabled — so with a level-held IRQ, sysint1 bit 2 stays set and
-	 * every eret re-fires the exception, producing a ~99 kHz ISR storm
-	 * (memory/project_post_ppsh_stall.md pass 5-7).
-	 *
-	 * Fix: mark IP2 as edge-triggered via the CPU's ip_edge_triggered
-	 * _mask (set in dev_vr41xx_init below). On EXCEPTION_INT entry,
-	 * cpu_mips.c clears CAUSE.IP2 and calls vr41xx_on_interrupt_delivered
-	 * here so we also clear the VRIP-side latch (sysint1 bit 2 +
-	 * rtc.rtcint RTCINTR1). Net effect: each RTCL1 underflow produces a
-	 * single CPU exception, and the subsequent eret sees IP=0.
+	 *  An RTCLong1 underflow raises its request, which stays up until
+	 *  RTCINTREG bit 1 is written (vr41xx_update_cpu_lines: it goes to
+	 *  Int1, not to the shared Int0).
 	 */
 	if (d->pending_timer_interrupts > 1)
 		d->pending_timer_interrupts = 1;
@@ -638,20 +693,46 @@ DEVICE_TICK(vr41xx)
 	}
 
 	/*
-	 *  ETIME/ECMP compare interrupt — used by Linux 2.6 VR41xx timer
-	 *  and WinCE elapsed time timer.
-	 *  The 2.6 kernel programs ECMP and expects an interrupt when
-	 *  ETIME reaches ECMP.  Only use this path when the RTCL1 timer
-	 *  is not active; the 2.4 kernel creates the
-	 *  RTCL1 timer via offset 0xd0 and the initial etime >> ecmp
-	 *  would cause a spurious interrupt storm.
+	 *  The Elapsed Time alarm (ETIME reached ECMP) requests through
+	 *  SYSINT1 bit 3 until RTCINTREG bit 0 is written (VR4131 UM 13.2.9).
+	 *  It does not depend on RTCLong1: this used to be held back while
+	 *  RTCL1 ran, from when RTCLong1 shared Int0 and the alarm fired for
+	 *  any ETIME past ECMP.
 	 */
-	if (d->rtcl1_divisor == 0 &&
-	    (d->rtc.rtcint & RTCINT_ELAPSEDTIME_INT))
+	if (d->rtc.rtcint & RTCINT_ELAPSEDTIME_INT)
 		INTERRUPT_ASSERT(d->timer_irq);
 
 	/*  KIU keyboard tick — disabled (no X11 keyboard input)  */
 	(void)vr41xx_keytick;
+}
+
+DEVICE_TICK(vr41xx)
+{
+	struct vr41xx_data *d = (struct vr41xx_data *) extra;
+
+	vr41xx_advance_time(cpu, d, cpu->ninstrs);
+}
+
+/*
+ *  vr41xx_cycles_now():
+ *
+ *  The cycle count at a register access. cpu->ninstrs only moves at the end
+ *  of a dyntrans batch, so add what the batch has counted so far, and one
+ *  cycle for each access made in it: a bus access takes time, and the
+ *  batch's own count moves in steps that can stay in phase with a short
+ *  polling loop. Windows CE sets the clock after waiting for two successive
+ *  reads of ETIMELREG to differ (NK 0x800A7C80-0x800A7C88); with a counter
+ *  that only moved between batches that loop could never end.
+ */
+static uint64_t vr41xx_cycles_now(struct cpu *cpu, struct vr41xx_data *d)
+{
+	if (d->access_batch_start != cpu->ninstrs) {
+		d->access_batch_start = cpu->ninstrs;
+		d->access_cycles = 0;
+	}
+	d->access_cycles ++;
+	return cpu->ninstrs + d->access_cycles +
+	    (cpu->n_translated_instrs > 0 ? cpu->n_translated_instrs : 0);
 }
 
 
@@ -847,15 +928,12 @@ DEVICE_ACCESS(vr41xx)
 	case 0x80:	/*  Level 1 system interrupt reg 1...  */
 		if (writeflag == MEM_READ)
 			odata = d->sysint1;
-		else {
-			/*  TODO: clear-on-write-one?  */
-			d->sysint1 &= ~idata;
-			d->sysint1 &= 0xffff;
-		}
+		/*  Read-only: it shows the sources' levels, which are
+		    cleared at the sources (VR4131 UM 11.2.1).  */
 		break;
 	case 0x88:
 		if (writeflag == MEM_READ)
-			odata = d->giuint;
+			odata = vr41xx_giu_pending(d);
 		else
 			d->giuint &= ~idata;
 		break;
@@ -884,11 +962,7 @@ DEVICE_ACCESS(vr41xx)
 	case 0xa0:	/*  Level 1 system interrupt reg 2...  */
 		if (writeflag == MEM_READ)
 			odata = d->sysint2;
-		else {
-			/*  TODO: clear-on-write-one?  */
-			d->sysint2 &= ~idata;
-			d->sysint2 &= 0xffff;
-		}
+		/*  Read-only, like SYSINT1REG (VR4131 UM 11.2.6).  */
 		break;
 	case 0xa6:
 		if (writeflag == MEM_READ)
@@ -911,6 +985,7 @@ DEVICE_ACCESS(vr41xx)
 			} else {
 				pmu_write(&d->pmu, pmu_off, (unsigned)len,
 				    (uint32_t)idata);
+				vr41xx_update_power_intr(d);
 				/*
 				 * SOFTRST dispatch: pmu_write staged the
 				 * RSTSW cause bit and set softrst_pending;
@@ -994,6 +1069,10 @@ DEVICE_ACCESS(vr41xx)
 	case 0x114:	/*  VR4131 RTCL1CNTLREG  */
 	case 0x116:	/*  VR4131 RTCL1CNTHREG  */
 		if (d->cpumodel == 4131 && writeflag == MEM_READ &&
+		    relative_addr <= 0x104)
+			vr41xx_advance_time(cpu, d,
+			    vr41xx_cycles_now(cpu, d));
+		if (d->cpumodel == 4131 && writeflag == MEM_READ &&
 		    (relative_addr == 0x114 || relative_addr == 0x116)) {
 			/*  The RTCL1 down-counter (VR4131 UM 13.2.6):
 			    32.768 kHz ticks left in this period.  */
@@ -1066,9 +1145,15 @@ DEVICE_ACCESS(vr41xx)
 		{
 			int idx = ((int)relative_addr - 0x140) / 2;
 			if (idx >= 0 && idx < 16) {
-				if (writeflag == MEM_WRITE)
+				if (writeflag == MEM_WRITE) {
 					d->giu_regs[idx] = (uint16_t)idata;
-				else
+					/*  Enabling a pin that is already
+					    at its active level latches the
+					    request.  */
+					if (relative_addr == 0x14c)
+						d->giu_regs[4] |= d->giuint &
+						    (uint16_t)idata;
+				} else
 					odata = d->giu_regs[idx];
 			}
 		}
@@ -1087,7 +1172,8 @@ DEVICE_ACCESS(vr41xx)
 					d->giu_regs[idx] &= ~(uint16_t)idata;
 					if (relative_addr == 0x148) {
 						d->giuint &= ~(uint16_t)idata;
-						if ((d->giuint & d->giumask) == 0)
+						if ((vr41xx_giu_pending(d) &
+						    d->giumask) == 0)
 							INTERRUPT_DEASSERT(d->giu_irq);
 					}
 				} else
@@ -1097,7 +1183,9 @@ DEVICE_ACCESS(vr41xx)
 		break;
 	case 0x144:	/*  GIUPIODL - Pin I/O data low  */
 		if (writeflag == MEM_WRITE) {
-			/*  Just latch output bits  */
+			/*  The output latch. It drives the pins GIUIOSELL
+			    makes outputs (VR4131 UM, GIUPIODL).  */
+			d->giu_regs[2] = (uint16_t)idata;
 		} else {
 			/*
 			 *  Return board strap / GPIO input state.
@@ -1118,6 +1206,9 @@ DEVICE_ACCESS(vr41xx)
 			if (dev_vr41xx_giu_pins_hook != NULL)
 				odata = dev_vr41xx_giu_pins_hook(
 				    (uint16_t)odata);
+			/*  An output pin reads back what was latched.  */
+			odata = (odata & ~(uint64_t)d->giu_regs[0]) |
+			    (d->giu_regs[2] & d->giu_regs[0]);
 		}
 		break;
 
@@ -1140,14 +1231,11 @@ ret:
 	/*
 	 *  Recalculate interrupt assertions:
 	 */
-	if (d->giuint & d->giumask)
+	if (vr41xx_giu_pending(d) & d->giumask)
                 INTERRUPT_ASSERT(d->giu_irq);
 	else
                 INTERRUPT_DEASSERT(d->giu_irq);
-	if ((d->sysint1 & d->msysint1) | (d->sysint2 & d->msysint2))
-                INTERRUPT_ASSERT(d->cpu_irq);
-	else
-                INTERRUPT_DEASSERT(d->cpu_irq);
+	vr41xx_update_cpu_lines(d);
 
 	if (writeflag == MEM_READ)
 		memory_writemax64(cpu, data, len, odata);
@@ -1190,7 +1278,7 @@ static void vr41xx_reset_units(struct vr41xx_data *d)
 	d->sysint2 = d->msysint2 = 0;
 	d->giuint = d->giumask = 0;
 	d->pending_timer_interrupts = 0;
-	INTERRUPT_DEASSERT(d->cpu_irq);
+	vr41xx_update_power_intr(d);	/*  the PMU keeps its request  */
 	cmu_init(&d->cmu);
 	memset(d->dmaau_regs, 0, sizeof(d->dmaau_regs));
 	memset(d->dcu_regs, 0, sizeof(d->dcu_regs));
@@ -1201,8 +1289,9 @@ static void vr41xx_reset_units(struct vr41xx_data *d)
  *  dev_vr41xx_power_switch():
  *
  *  The board's POWER pin, high while the button is held. A rising edge
- *  while hibernating is a wake (UM §12.1.3(1)); while running, the power
- *  switch interrupt (POWERSWINTR) is not modelled yet.
+ *  while hibernating is a wake (UM §12.1.3(1)); while running it is the
+ *  power switch interrupt, raised from the next device tick because this
+ *  can be called from the host's input thread.
  */
 void dev_vr41xx_power_switch(int pressed)
 {
@@ -1210,8 +1299,12 @@ void dev_vr41xx_power_switch(int pressed)
 
 	if (d == NULL)
 		return;
-	if (pressed && !d->power_pin && d->hibernating)
-		d->power_edge = 1;
+	if (pressed && !d->power_pin) {
+		if (d->hibernating)
+			d->power_edge = 1;
+		else
+			d->power_press = 1;
+	}
 	d->power_pin = pressed != 0;
 }
 
@@ -1306,19 +1399,12 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	    machine->path, machine->bootstrap_cpu);
 	INTERRUPT_CONNECT(tmps, d->cpu_irq);
 
-	/*
-	 *  Mark IP2 as edge-triggered so mips_cpu_exception() auto-clears
-	 *  the IRQ after the CPU takes the exception (see
-	 *  vr41xx_on_interrupt_delivered above). CAUSE.IP2 is bit 10 of
-	 *  CAUSE (STATUS_IM_SHIFT + 2). Without this, WinCE NK's RTCL1 ISR
-	 *  re-enters ~15× per underflow — see memory/project_post_ppsh
-	 *  _stall.md pass 5-7 and VR4131 UM §11.2.1 / §13.2.9.
-	 */
-	{
-		struct cpu *c = machine->cpus[machine->bootstrap_cpu];
-		c->cd.mips.ip_edge_triggered_mask |= (1u << 10);
-		c->cd.mips.ip_edge_delivered = vr41xx_on_interrupt_delivered;
-		c->cd.mips.ip_edge_delivered_extra = d;
+	/*  RTCLong1's own input, Int1 = MIPS irq 3 (VR4122/VR4131).  */
+	if (cpumodel == 4131 || cpumodel == 4122) {
+		snprintf(tmps, sizeof(tmps), "%s.cpu[%i].3",
+		    machine->path, machine->bootstrap_cpu);
+		INTERRUPT_CONNECT(tmps, d->int1_irq);
+		d->has_int1 = 1;
 	}
 	g_vr41xx_for_edge_cb = d;
 
