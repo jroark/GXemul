@@ -667,16 +667,13 @@ static void vr41xx_advance_time(struct cpu *cpu, struct vr41xx_data *d,
 	}
 
 	/*
-	 *  ETIME/ECMP compare interrupt — used by Linux 2.6 VR41xx timer
-	 *  and WinCE elapsed time timer.
-	 *  The 2.6 kernel programs ECMP and expects an interrupt when
-	 *  ETIME reaches ECMP.  Only use this path when the RTCL1 timer
-	 *  is not active; the 2.4 kernel creates the
-	 *  RTCL1 timer via offset 0xd0 and the initial etime >> ecmp
-	 *  would cause a spurious interrupt storm.
+	 *  The Elapsed Time alarm (ETIME reached ECMP) requests through
+	 *  SYSINT1 bit 3 until RTCINTREG bit 0 is written (VR4131 UM 13.2.9).
+	 *  It does not depend on RTCLong1: this used to be held back while
+	 *  RTCL1 ran, from when RTCLong1 shared Int0 and the alarm fired for
+	 *  any ETIME past ECMP.
 	 */
-	if (d->rtcl1_divisor == 0 &&
-	    (d->rtc.rtcint & RTCINT_ELAPSEDTIME_INT))
+	if (d->rtc.rtcint & RTCINT_ELAPSEDTIME_INT)
 		INTERRUPT_ASSERT(d->timer_irq);
 
 	/*  KIU keyboard tick — disabled (no X11 keyboard input)  */
