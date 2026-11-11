@@ -67,8 +67,10 @@
 #define	DEV_VR41XX_LENGTH		0x800	/*  up to (not including) SIU at 0x800  */
 struct vr41xx_data {
 	struct interrupt cpu_irq;		/*  Connected to MIPS irq 2  */
+	struct interrupt int1_irq;		/*  RTCLong1: MIPS irq 3  */
 	uint64_t	access_batch_start;	/*  see vr41xx_cycles_now()  */
 	uint64_t	access_cycles;
+	int		has_int1;
 	int		cpumodel;		/*  Model nr, e.g. 4121  */
 	struct machine *machine;
 
@@ -167,6 +169,45 @@ static void vr41xx_seed_latch32(uint8_t *regs, uint32_t off, uint32_t value)
 }
 
 /*
+ *  vr41xx_update_cpu_lines():
+ *
+ *  The ICU's requests to the CPU. On the VR4122/VR4131 RTCLong1 does not
+ *  go to Int0 with the other sources: it has its own input, Int1 (CPU IP3),
+ *  and RTCLong2 has Int2. Linux's vr41xx ICU driver has the same fixed
+ *  assignment (sysint1_assign[2] = 1, sysint2_assign[0] = 2; only the VR4133
+ *  can change it), and a real BE-300 under Windows CE shows it: SYSINT1REG
+ *  and MSYSINT1REG both have bit 2 set (0x0004, 0x0307) while Cause is
+ *  0x00000810, IP3 pending and IP2 clear, with Status 0x00008401 leaving IP3
+ *  masked (be300 docs/hardware/hw_dump_vr4131.txt, cpu_state.txt). Windows CE
+ *  never serves RTCLong1; its IP2 dispatcher drops bit 2 (NK 0x800A7B70) and
+ *  its tick is CP0 Compare.
+ *
+ *  A request stays up until its source is cleared; for RTCLong1 that is a
+ *  write of 1 to RTCINTREG bit 1 (VR4131 UM 13.2.9).
+ */
+#define	VR41XX_SYSINT1_RTCL1	(1 << 2)
+#define	VR41XX_SYSINT2_RTCL2	(1 << 0)
+
+static void vr41xx_update_cpu_lines(struct vr41xx_data *d)
+{
+	uint32_t p1 = d->sysint1 & d->msysint1;
+	uint32_t p2 = d->sysint2 & d->msysint2;
+
+	if (d->has_int1) {
+		if (p1 & VR41XX_SYSINT1_RTCL1)
+			INTERRUPT_ASSERT(d->int1_irq);
+		else
+			INTERRUPT_DEASSERT(d->int1_irq);
+		p1 &= ~VR41XX_SYSINT1_RTCL1;
+		p2 &= ~VR41XX_SYSINT2_RTCL2;
+	}
+	if (p1 | p2)
+		INTERRUPT_ASSERT(d->cpu_irq);
+	else
+		INTERRUPT_DEASSERT(d->cpu_irq);
+}
+
+/*
  *  vr41xx_vrip_interrupt_assert():
  *  vr41xx_vrip_interrupt_deassert():
  */
@@ -178,8 +219,7 @@ void vr41xx_vrip_interrupt_assert(struct interrupt *interrupt)
 		d->sysint1 |= (1 << line);
 	else
 		d->sysint2 |= (1 << (line-16));
-	if ((d->sysint1 & d->msysint1) | (d->sysint2 & d->msysint2))
-                INTERRUPT_ASSERT(d->cpu_irq);
+	vr41xx_update_cpu_lines(d);
 }
 void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
 {
@@ -189,8 +229,7 @@ void vr41xx_vrip_interrupt_deassert(struct interrupt *interrupt)
 		d->sysint1 &= ~(1 << line);
 	else
 		d->sysint2 &= ~(1 << (line-16));
-	if (!(d->sysint1 & d->msysint1) && !(d->sysint2 & d->msysint2))
-                INTERRUPT_DEASSERT(d->cpu_irq);
+	vr41xx_update_cpu_lines(d);
 }
 
 /*
@@ -224,42 +263,6 @@ int dev_vr41xx_set_rtc_ymdhms(struct machine *machine, int year, int month,
 	return rtc_init_from_ymdhms(&d->rtc, year, month, day, hour, minute,
 	    second);
 }
-
-/*
- *  vr41xx_on_interrupt_delivered():
- *
- *  The CPU's ip_edge_delivered hook: called by mips_cpu_exception() when
- *  the CPU takes an EXCEPTION_INT
- *  whose CAUSE.IP bits include any of ip_edge_triggered_mask. This lets
- *  the VRIP aggregator resync its internal latches now that the CPU has
- *  delivered the edge.
- *
- *  IP2 is the shared VRIP CPU line for SYSINT1/SYSINT2 sources. RTCL1 is
- *  edge-triggered and consumed on delivery (VR4131 UM sections 11.2.1
- *  and 13.2.9). Other enabled level sources such as GIU/touch must keep
- *  IP2 asserted after the CPU-side edge latch is cleared.
- */
-static void vr41xx_on_interrupt_delivered(void *extra,
-	uint32_t cleared_ip_mask)
-{
-	struct vr41xx_data *d = (struct vr41xx_data *) extra;
-
-	/*  CAUSE bit 10 == IP2 (STATUS_IM_SHIFT + 2). If that's in the
-	    cleared mask, consume the RTCL1 edge.  */
-	if ((cleared_ip_mask & (1u << 10)) != 0 && d->rtcl1_irq_asserted) {
-		d->sysint1 &= ~(1u << 2);
-		d->rtc.rtcint &= ~RTCINT_RTCLONG1_INT;
-		d->rtcl1_irq_asserted = 0;
-	}
-	if ((cleared_ip_mask & (1u << 10)) != 0) {
-		if ((d->sysint1 & d->msysint1) ||
-		    (d->sysint2 & d->msysint2))
-			INTERRUPT_ASSERT(d->cpu_irq);
-		else
-			INTERRUPT_DEASSERT(d->cpu_irq);
-	}
-}
-
 
 /*
  *  The GIU lines that request an interrupt. On the VR4131 a pin only
@@ -606,7 +609,6 @@ static void vr41xx_advance_time(struct cpu *cpu, struct vr41xx_data *d,
 		tick_cycles = now - d->last_cycle_sample;
 		d->last_cycle_sample = now;
 
-
 		/*  Pet / fire the PMU HALTimer watchdog (UM §12.2.2).  */
 		pmu_tick(&d->pmu, now);
 	}
@@ -652,23 +654,9 @@ static void vr41xx_advance_time(struct cpu *cpu, struct vr41xx_data *d,
 	}
 
 	/*
-	 * RTCL1 delivery model (per VR4131 UM §11.2.1 SYSINT1 read-only,
-	 * §13.2.9 RTCINTREG.RTCINTR1 sticky W1C).
-	 *
-	 * RTCL1 is a brief edge pulse on real hardware. WinCE NK's OAL IP2
-	 * dispatcher does NOT write RTCINTREG to ack (only 2 RTCINTREG
-	 * writes observed across 15 s of boot, both at init), and NK's ISR
-	 * mask manipulation (MSYSINT1=0 then back to 0x0105) has RTCL1 bit 2
-	 * enabled — so with a level-held IRQ, sysint1 bit 2 stays set and
-	 * every eret re-fires the exception, producing a ~99 kHz ISR storm
-	 * (memory/project_post_ppsh_stall.md pass 5-7).
-	 *
-	 * Fix: mark IP2 as edge-triggered via the CPU's ip_edge_triggered
-	 * _mask (set in dev_vr41xx_init below). On EXCEPTION_INT entry,
-	 * cpu_mips.c clears CAUSE.IP2 and calls vr41xx_on_interrupt_delivered
-	 * here so we also clear the VRIP-side latch (sysint1 bit 2 +
-	 * rtc.rtcint RTCINTR1). Net effect: each RTCL1 underflow produces a
-	 * single CPU exception, and the subsequent eret sees IP=0.
+	 *  An RTCLong1 underflow raises its request, which stays up until
+	 *  RTCINTREG bit 1 is written (vr41xx_update_cpu_lines: it goes to
+	 *  Int1, not to the shared Int0).
 	 */
 	if (d->pending_timer_interrupts > 1)
 		d->pending_timer_interrupts = 1;
@@ -723,7 +711,6 @@ static uint64_t vr41xx_cycles_now(struct cpu *cpu, struct vr41xx_data *d)
 	return cpu->ninstrs + d->access_cycles +
 	    (cpu->n_translated_instrs > 0 ? cpu->n_translated_instrs : 0);
 }
-
 
 
 /*
@@ -1224,10 +1211,7 @@ ret:
                 INTERRUPT_ASSERT(d->giu_irq);
 	else
                 INTERRUPT_DEASSERT(d->giu_irq);
-	if ((d->sysint1 & d->msysint1) | (d->sysint2 & d->msysint2))
-                INTERRUPT_ASSERT(d->cpu_irq);
-	else
-                INTERRUPT_DEASSERT(d->cpu_irq);
+	vr41xx_update_cpu_lines(d);
 
 	if (writeflag == MEM_READ)
 		memory_writemax64(cpu, data, len, odata);
@@ -1270,7 +1254,7 @@ static void vr41xx_reset_units(struct vr41xx_data *d)
 	d->sysint2 = d->msysint2 = 0;
 	d->giuint = d->giumask = 0;
 	d->pending_timer_interrupts = 0;
-	INTERRUPT_DEASSERT(d->cpu_irq);
+	vr41xx_update_cpu_lines(d);
 	cmu_init(&d->cmu);
 	memset(d->dmaau_regs, 0, sizeof(d->dmaau_regs));
 	memset(d->dcu_regs, 0, sizeof(d->dcu_regs));
@@ -1386,19 +1370,12 @@ struct vr41xx_data *dev_vr41xx_init(struct machine *machine,
 	    machine->path, machine->bootstrap_cpu);
 	INTERRUPT_CONNECT(tmps, d->cpu_irq);
 
-	/*
-	 *  Mark IP2 as edge-triggered so mips_cpu_exception() auto-clears
-	 *  the IRQ after the CPU takes the exception (see
-	 *  vr41xx_on_interrupt_delivered above). CAUSE.IP2 is bit 10 of
-	 *  CAUSE (STATUS_IM_SHIFT + 2). Without this, WinCE NK's RTCL1 ISR
-	 *  re-enters ~15× per underflow — see memory/project_post_ppsh
-	 *  _stall.md pass 5-7 and VR4131 UM §11.2.1 / §13.2.9.
-	 */
-	{
-		struct cpu *c = machine->cpus[machine->bootstrap_cpu];
-		c->cd.mips.ip_edge_triggered_mask |= (1u << 10);
-		c->cd.mips.ip_edge_delivered = vr41xx_on_interrupt_delivered;
-		c->cd.mips.ip_edge_delivered_extra = d;
+	/*  RTCLong1's own input, Int1 = MIPS irq 3 (VR4122/VR4131).  */
+	if (cpumodel == 4131 || cpumodel == 4122) {
+		snprintf(tmps, sizeof(tmps), "%s.cpu[%i].3",
+		    machine->path, machine->bootstrap_cpu);
+		INTERRUPT_CONNECT(tmps, d->int1_irq);
+		d->has_int1 = 1;
 	}
 	g_vr41xx_for_edge_cb = d;
 
