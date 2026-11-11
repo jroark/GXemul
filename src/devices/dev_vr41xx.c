@@ -67,6 +67,8 @@
 #define	DEV_VR41XX_LENGTH		0x800	/*  up to (not including) SIU at 0x800  */
 struct vr41xx_data {
 	struct interrupt cpu_irq;		/*  Connected to MIPS irq 2  */
+	uint64_t	access_batch_start;	/*  see vr41xx_cycles_now()  */
+	uint64_t	access_cycles;
 	int		cpumodel;		/*  Model nr, e.g. 4121  */
 	struct machine *machine;
 
@@ -570,9 +572,17 @@ static void timer_tick(struct timer *timer, void *extra)
 }
 
 
-DEVICE_TICK(vr41xx)
+/*
+ *  vr41xx_advance_time():
+ *
+ *  Bring the RTC, RTCL1 and the PMU HALTimer up to cycle `now`. Called at
+ *  the end of every dyntrans batch (DEVICE_TICK) and, with the cycles run
+ *  so far in the current batch, when the guest reads the Elapsed Time
+ *  counter (vr41xx_cycles_now).
+ */
+static void vr41xx_advance_time(struct cpu *cpu, struct vr41xx_data *d,
+	uint64_t now)
 {
-	struct vr41xx_data *d = (struct vr41xx_data *) extra;
 	uint64_t emulated_hz;
 	uint64_t tick_cycles;
 
@@ -589,10 +599,13 @@ DEVICE_TICK(vr41xx)
 	 * write it and it runs at a different rate.
 	 */
 	{
-		uint64_t now = cpu->ninstrs;
-
+		/*  A read inside a batch may already have advanced to a
+		    cycle past the batch's start.  */
+		if (now < d->last_cycle_sample)
+			now = d->last_cycle_sample;
 		tick_cycles = now - d->last_cycle_sample;
 		d->last_cycle_sample = now;
+
 
 		/*  Pet / fire the PMU HALTimer watchdog (UM §12.2.2).  */
 		pmu_tick(&d->pmu, now);
@@ -681,6 +694,36 @@ DEVICE_TICK(vr41xx)
 	/*  KIU keyboard tick — disabled (no X11 keyboard input)  */
 	(void)vr41xx_keytick;
 }
+
+DEVICE_TICK(vr41xx)
+{
+	struct vr41xx_data *d = (struct vr41xx_data *) extra;
+
+	vr41xx_advance_time(cpu, d, cpu->ninstrs);
+}
+
+/*
+ *  vr41xx_cycles_now():
+ *
+ *  The cycle count at a register access. cpu->ninstrs only moves at the end
+ *  of a dyntrans batch, so add what the batch has counted so far, and one
+ *  cycle for each access made in it: a bus access takes time, and the
+ *  batch's own count moves in steps that can stay in phase with a short
+ *  polling loop. Windows CE sets the clock after waiting for two successive
+ *  reads of ETIMELREG to differ (NK 0x800A7C80-0x800A7C88); with a counter
+ *  that only moved between batches that loop could never end.
+ */
+static uint64_t vr41xx_cycles_now(struct cpu *cpu, struct vr41xx_data *d)
+{
+	if (d->access_batch_start != cpu->ninstrs) {
+		d->access_batch_start = cpu->ninstrs;
+		d->access_cycles = 0;
+	}
+	d->access_cycles ++;
+	return cpu->ninstrs + d->access_cycles +
+	    (cpu->n_translated_instrs > 0 ? cpu->n_translated_instrs : 0);
+}
+
 
 
 /*
@@ -1014,6 +1057,10 @@ DEVICE_ACCESS(vr41xx)
 	case 0x10c:	/*  VR4131 ECMPHREG  */
 	case 0x114:	/*  VR4131 RTCL1CNTLREG  */
 	case 0x116:	/*  VR4131 RTCL1CNTHREG  */
+		if (d->cpumodel == 4131 && writeflag == MEM_READ &&
+		    relative_addr <= 0x104)
+			vr41xx_advance_time(cpu, d,
+			    vr41xx_cycles_now(cpu, d));
 		if (d->cpumodel == 4131 && writeflag == MEM_READ &&
 		    (relative_addr == 0x114 || relative_addr == 0x116)) {
 			/*  The RTCL1 down-counter (VR4131 UM 13.2.6):
