@@ -120,6 +120,7 @@ struct vr41xx_data {
 	int		hibernating;
 	int		power_pin;		/*  POWER, high while pressed  */
 	int		power_edge;		/*  a rising edge while hibernating  */
+	int		power_press;		/*  a rising edge while running  */
 };
 
 
@@ -185,6 +186,7 @@ static void vr41xx_seed_latch32(uint8_t *regs, uint32_t off, uint32_t value)
  *  A request stays up until its source is cleared; for RTCLong1 that is a
  *  write of 1 to RTCINTREG bit 1 (VR4131 UM 13.2.9).
  */
+#define	VR41XX_SYSINT1_POWER	(1 << 1)
 #define	VR41XX_SYSINT1_RTCL1	(1 << 2)
 #define	VR41XX_SYSINT2_RTCL2	(1 << 0)
 
@@ -206,6 +208,25 @@ static void vr41xx_update_cpu_lines(struct vr41xx_data *d)
 	else
 		INTERRUPT_DEASSERT(d->cpu_irq);
 }
+
+/*
+ *  SYSINT1REG.POWERINTR is the PMU's power switch request and follows
+ *  PMUINTREG.POWERSWINTR, which software clears by writing 1 to it. Windows
+ *  CE keeps it unmasked (MSYSINT1REG 0x0307 in docs/hardware/
+ *  hw_dump_vr4131.txt) and gives it the same handler as the companion's
+ *  button source (NK 0x800A9014-0x800A9028).
+ */
+static void vr41xx_update_power_intr(struct vr41xx_data *d)
+{
+	if (d->cpumodel != 4131)
+		return;
+	if (pmu_read(&d->pmu, PMU_PMUINTREG, 2) & PMUINTREG_POWERSWINTR)
+		d->sysint1 |= VR41XX_SYSINT1_POWER;
+	else
+		d->sysint1 &= ~VR41XX_SYSINT1_POWER;
+	vr41xx_update_cpu_lines(d);
+}
+
 
 /*
  *  vr41xx_vrip_interrupt_assert():
@@ -611,6 +632,11 @@ static void vr41xx_advance_time(struct cpu *cpu, struct vr41xx_data *d,
 
 		/*  Pet / fire the PMU HALTimer watchdog (UM §12.2.2).  */
 		pmu_tick(&d->pmu, now);
+		if (d->power_press) {
+			d->power_press = 0;
+			pmu_power_switch(&d->pmu);
+			vr41xx_update_power_intr(d);
+		}
 	}
 
 	if (d->etime_period_cycles == 0) {
@@ -959,6 +985,7 @@ DEVICE_ACCESS(vr41xx)
 			} else {
 				pmu_write(&d->pmu, pmu_off, (unsigned)len,
 				    (uint32_t)idata);
+				vr41xx_update_power_intr(d);
 				/*
 				 * SOFTRST dispatch: pmu_write staged the
 				 * RSTSW cause bit and set softrst_pending;
@@ -1251,7 +1278,7 @@ static void vr41xx_reset_units(struct vr41xx_data *d)
 	d->sysint2 = d->msysint2 = 0;
 	d->giuint = d->giumask = 0;
 	d->pending_timer_interrupts = 0;
-	vr41xx_update_cpu_lines(d);
+	vr41xx_update_power_intr(d);	/*  the PMU keeps its request  */
 	cmu_init(&d->cmu);
 	memset(d->dmaau_regs, 0, sizeof(d->dmaau_regs));
 	memset(d->dcu_regs, 0, sizeof(d->dcu_regs));
@@ -1262,8 +1289,9 @@ static void vr41xx_reset_units(struct vr41xx_data *d)
  *  dev_vr41xx_power_switch():
  *
  *  The board's POWER pin, high while the button is held. A rising edge
- *  while hibernating is a wake (UM §12.1.3(1)); while running, the power
- *  switch interrupt (POWERSWINTR) is not modelled yet.
+ *  while hibernating is a wake (UM §12.1.3(1)); while running it is the
+ *  power switch interrupt, raised from the next device tick because this
+ *  can be called from the host's input thread.
  */
 void dev_vr41xx_power_switch(int pressed)
 {
@@ -1271,8 +1299,12 @@ void dev_vr41xx_power_switch(int pressed)
 
 	if (d == NULL)
 		return;
-	if (pressed && !d->power_pin && d->hibernating)
-		d->power_edge = 1;
+	if (pressed && !d->power_pin) {
+		if (d->hibernating)
+			d->power_edge = 1;
+		else
+			d->power_press = 1;
+	}
 	d->power_pin = pressed != 0;
 }
 
